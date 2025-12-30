@@ -35,6 +35,12 @@ interface CascadeMaps {
   categoryEquipmentProductToNumbers: Map<string, string[]>;
 }
 
+interface CategoryRequirement {
+  required_flag: number;
+  rule_text: string | null;
+  parse_note: string | null;
+}
+
 function normalizeSiteId(input: string): { normalized: string; rawDigits: string; original: string } {
   const trimmed = input.trim();
   const original = trimmed;
@@ -65,7 +71,8 @@ type CategoryTab = (typeof CATEGORY_TABS)[number];
 
 export default function Home() {
   const [siteIdInput, setSiteIdInput] = useState('');
-  const [results, setResults] = useState<InventoryRow[]>([]);
+  const [allSiteRows, setAllSiteRows] = useState<InventoryRow[]>([]);
+  const [requirementsMap, setRequirementsMap] = useState<Map<string, CategoryRequirement>>(new Map());
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [searched, setSearched] = useState(false);
@@ -174,15 +181,54 @@ export default function Home() {
     loadTagCategories();
   }, []);
 
-  const categoryFilteredResults = useMemo(() => {
-    if (activeTab === 'All') return results;
-    return results.filter((row) => (row.category || '').trim() === activeTab);
-  }, [activeTab, results]);
+  const normalizeCategoryName = (category: string | null | CategoryTab) =>
+    (category ?? '')
+      .toString()
+      .trim()
+      .replace(/[\s_]+/g, '-')
+      .toLowerCase();
 
-  const displayedResults = useMemo(() => {
+  const normalizeSheetSource = (src: string | null) => (src ?? '').toString().trim().toLowerCase();
+
+  const activeRequirement = useMemo(() => {
+    if (activeTab === 'All') return null;
+    const key = normalizeCategoryName(activeTab);
+    return requirementsMap.get(key) || null;
+  }, [activeTab, requirementsMap]);
+
+  const activeRequirementText = useMemo(() => {
+    if (!activeRequirement) return '';
+    return [activeRequirement.rule_text, activeRequirement.parse_note]
+      .map((text) => (text ?? '').trim())
+      .filter((text) => text.length > 0)
+      .join(' ');
+  }, [activeRequirement]);
+
+  const { visibleRows, hiddenDuplicateCount } = useMemo(() => {
+    const normActiveTab = normalizeCategoryName(activeTab);
+
+    const filteredByTab =
+      activeTab === 'All'
+        ? allSiteRows
+        : allSiteRows.filter((row) => normalizeCategoryName(row.category) === normActiveTab);
+
+    let hiddenNfoCount = 0;
+
+    const afterNfoFilter = filteredByTab.filter((row) => {
+      const catNorm = normalizeCategoryName(row.category);
+      const srcNorm = normalizeSheetSource(row.sheet_source);
+      const isMwOrRanActive = catNorm === 'mw-active' || catNorm === 'ran-active';
+      const isNfo = srcNorm === 'nfo_sheet';
+
+      if (isMwOrRanActive && isNfo) {
+        hiddenNfoCount += 1;
+        return false;
+      }
+      return true;
+    });
+
     const seen = new Set<string>();
-
-    return categoryFilteredResults.filter((row) => {
+    const deduped = afterNfoFilter.filter((row) => {
       const site = (row.site_id || '').trim();
       const serial = (row.serial_number || '').trim();
 
@@ -193,9 +239,11 @@ export default function Home() {
       seen.add(key);
       return true;
     });
-  }, [categoryFilteredResults]);
 
-  const hiddenDuplicateCount = categoryFilteredResults.length - displayedResults.length;
+    const hiddenDupCount = afterNfoFilter.length - deduped.length;
+
+    return { visibleRows: deduped, hiddenDuplicateCount: hiddenDupCount };
+  }, [activeTab, allSiteRows]);
 
   const getEquipmentTypes = (category: string | null): string[] => {
     if (!category) return [];
@@ -227,6 +275,7 @@ export default function Home() {
     try {
       const { normalized, rawDigits, original } = normalizeSiteId(siteIdInput);
       const searchValues = [...new Set([normalized, rawDigits, original])];
+      const siteIdNorm = normalized.replace(/^[Ww]/, '');
 
       const { data, error: queryError } = await supabase
         .from('main_inventory')
@@ -238,10 +287,33 @@ export default function Home() {
 
       if (queryError) throw new Error(queryError.message);
 
-      setResults(data || []);
+      setAllSiteRows(data || []);
+
+      const { data: requirementsData, error: requirementsError } = await supabase
+        .from('site_category_requirements')
+        .select('category, required_flag, rule_text, parse_note')
+        .eq('site_id_norm', siteIdNorm);
+
+      if (requirementsError) {
+        console.error('Failed to load site category requirements:', requirementsError);
+        setRequirementsMap(new Map());
+      } else {
+        const nextMap = new Map<string, CategoryRequirement>();
+        (requirementsData || []).forEach((row: CategoryRequirement & { category: string }) => {
+          const key = normalizeCategoryName(row.category);
+          if (!key) return;
+          nextMap.set(key, {
+            required_flag: row.required_flag,
+            rule_text: row.rule_text,
+            parse_note: row.parse_note
+          });
+        });
+        setRequirementsMap(nextMap);
+      }
     } catch (err) {
       setError(err instanceof Error ? err.message : 'An error occurred while searching');
-      setResults([]);
+      setAllSiteRows([]);
+      setRequirementsMap(new Map());
     } finally {
       setLoading(false);
     }
@@ -284,7 +356,7 @@ export default function Home() {
     const newRow: InventoryRow = {
       id: 'NEW_TEMP_ID',
       site_id: normalizeSiteId(siteIdInput).normalized,
-      sheet_source: 'NFO',
+      sheet_source: 'Manual_added',
       category: activeTab !== 'All' ? activeTab : null,
       equipment_type: null,
       product_name: null,
@@ -351,7 +423,7 @@ export default function Home() {
 
     // Check against ALL results for this site_id (unfiltered by category tab)
     // This ensures we check against the complete dataset for the searched site
-    const allSiteRows = results.filter(r => {
+    const siteRows = allSiteRows.filter(r => {
       const rowSiteId = (r.site_id || '').trim().toLowerCase();
       const isSameSite = rowSiteId === siteId;
       const isSelfRow = !isNew && r.id === draft.id;
@@ -365,7 +437,7 @@ export default function Home() {
     // Check duplicate serial (only if non-empty)
     if (serial) {
       const serialLower = serial.toLowerCase();
-      hasDuplicateSerial = allSiteRows.some(r => {
+      hasDuplicateSerial = siteRows.some(r => {
         const existingSerial = (r.serial_number || '').trim().toLowerCase();
         return existingSerial && existingSerial === serialLower;
       });
@@ -377,7 +449,7 @@ export default function Home() {
     // Check duplicate tag_id (only if non-empty)
     if (tagId) {
       const tagIdLower = tagId.toLowerCase();
-      hasDuplicateTag = allSiteRows.some(r => {
+      hasDuplicateTag = siteRows.some(r => {
         const existingTagId = (r.tag_id || '').trim().toLowerCase();
         return existingTagId && existingTagId === tagIdLower;
       });
@@ -400,6 +472,24 @@ export default function Home() {
       setEditError('Category, Equipment Type, and Product Number are required.');
       setDuplicateFields({ serial: false, tagId: false });
       return;
+    }
+
+    if (isAddingNew) {
+      const ruleKey = normalizeCategoryName(draftRow.category);
+      const rule = requirementsMap.get(ruleKey);
+      if (rule && rule.required_flag === 0) {
+        const categoryLabel = (draftRow.category || 'This category').trim();
+        const details = [rule.parse_note, rule.rule_text]
+          .map((text) => (text ?? '').trim().replace(/[.]+$/, ''))
+          .filter((text) => text.length > 0)
+          .map((text) => `${text}.`)
+          .join(' ');
+        setEditError(
+          `Not allowed: ${categoryLabel} is not required for this Site.${details ? ' ' + details : ''}`
+        );
+        setDuplicateFields({ serial: false, tagId: false });
+        return;
+      }
     }
 
     // Check for duplicates against ALL site rows
@@ -441,10 +531,14 @@ export default function Home() {
         if (insertError) throw insertError;
 
         // Add to local state
-        setResults((prev) => [data, ...prev]);
+        setAllSiteRows((prev) => [data, ...prev]);
       } else {
+        const existingSourceNorm = normalizeSheetSource(draftRow.sheet_source);
+        const nextSheetSource = existingSourceNorm === 'manual_added' ? 'Manual_added' : 'Manual_edited';
+
         // UPDATE existing row
         await updateMainInventoryRow(draftRow.id, {
+          sheet_source: nextSheetSource,
           category: draftRow.category,
           equipment_type: draftRow.equipment_type,
           product_name: draftRow.product_name,
@@ -456,7 +550,9 @@ export default function Home() {
           tag_pic_url: draftRow.tag_pic_url
         });
 
-        setResults((prev) => prev.map((r) => (r.id === draftRow.id ? { ...r, ...draftRow } : r)));
+        setAllSiteRows((prev) =>
+          prev.map((r) => (r.id === draftRow.id ? { ...r, ...draftRow, sheet_source: nextSheetSource } : r))
+        );
       }
 
       cancelInlineEdit();
@@ -518,6 +614,19 @@ export default function Home() {
               ))}
             </div>
           </div>
+          {activeRequirement && (
+            <div className="px-4 py-2 text-xs text-slate-600 flex flex-wrap items-center gap-2">
+              <span
+                className={
+                  'inline-flex items-center px-2 py-0.5 rounded-full text-[11px] font-semibold ' +
+                  (activeRequirement.required_flag === 1 ? 'bg-emerald-100 text-emerald-700' : 'bg-amber-100 text-amber-700')
+                }
+              >
+                {activeRequirement.required_flag === 1 ? 'Required' : 'Not required'}
+              </span>
+              {activeRequirementText && <span>{activeRequirementText}</span>}
+            </div>
+          )}
         </div>
 
         {/* Error */}
@@ -532,24 +641,31 @@ export default function Home() {
           <div className="space-y-3">
             <div className="flex items-center justify-between">
               <div className="text-sm text-slate-700">
-                Showing <span className="font-semibold">{displayedResults.length}</span> row
-                {displayedResults.length !== 1 ? 's' : ''}
+                Showing <span className="font-semibold">{visibleRows.length}</span> row
+                {visibleRows.length !== 1 ? 's' : ''}
                 {hiddenDuplicateCount > 0 && (
                   <span className="text-slate-500"> ({hiddenDuplicateCount} duplicate{hiddenDuplicateCount !== 1 ? 's' : ''} hidden)</span>
                 )}
               </div>
               <button
                 onClick={beginAddNew}
-                disabled={saving || !searched || results.length === 0 || isAddingNew}
+                disabled={saving || !searched || allSiteRows.length === 0 || isAddingNew}
                 className="px-3 py-1.5 rounded-md bg-green-600 text-white text-sm font-medium hover:bg-green-700 disabled:opacity-50 disabled:cursor-not-allowed"
               >
                 + Add Row
               </button>
             </div>
 
-            {results.length === 0 ? (
+            {allSiteRows.length === 0 && !isAddingNew ? (
               <div className="bg-white border border-slate-200 rounded-lg p-8 text-center text-slate-600">
-                No data found for this site.
+                <div className="text-sm">No data found for this site.</div>
+                <button
+                  onClick={beginAddNew}
+                  disabled={saving || isAddingNew}
+                  className="mt-4 px-4 py-2 rounded-md bg-blue-600 text-white text-sm font-medium hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed"
+                >
+                  + Add First Row
+                </button>
               </div>
             ) : (
               <div className="bg-white border border-slate-200 rounded-lg overflow-hidden">
@@ -718,7 +834,7 @@ export default function Home() {
                       )}
 
                       {/* Existing rows */}
-                      {displayedResults.map((row) => {
+                      {visibleRows.map((row) => {
                         const isEditing = editingRowId === row.id;
                         const isDetailsExpanded = expandedDetailsRowId === row.id;
                         const rowKey = row.id || `${row.site_id}__${(row.serial_number || '').trim() || 'EMPTY'}__${row.product_number || row.product_name || ''}`;
@@ -726,8 +842,37 @@ export default function Home() {
                         return (
                           <React.Fragment key={rowKey}>
                             <tr className="hover:bg-slate-50">
-                              <td className="px-2 py-1.5 text-xs text-slate-800 truncate" title={row.sheet_source || ''}>
-                                {row.sheet_source || '—'}
+                              <td className="px-2 py-1.5 text-xs text-slate-800" title={row.sheet_source || ''}>
+                                <div className="flex items-center gap-1 min-w-0">
+                                  <span className="truncate" title={row.sheet_source || ''}>
+                                    {row.sheet_source || '—'}
+                                  </span>
+                                  {(() => {
+                                    const srcNorm = normalizeSheetSource(row.sheet_source);
+                                    let badgeText = '';
+                                    let badgeClass = '';
+
+                                    if (srcNorm === 'manual_added') {
+                                      badgeText = 'Added';
+                                      badgeClass = 'bg-emerald-100 text-emerald-700';
+                                    } else if (srcNorm === 'manual_edited') {
+                                      badgeText = 'Edited';
+                                      badgeClass = 'bg-blue-100 text-blue-700';
+                                    } else if (srcNorm === 'nfo_sheet') {
+                                      badgeText = 'NFO Import';
+                                      badgeClass = 'bg-orange-100 text-orange-700';
+                                    } else if (srcNorm === 'sys_sheet' || srcNorm === 'matched') {
+                                      badgeText = 'System';
+                                      badgeClass = 'bg-slate-100 text-slate-700';
+                                    }
+
+                                    return badgeText ? (
+                                      <span className={`inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-semibold ${badgeClass}`}>
+                                        {badgeText}
+                                      </span>
+                                    ) : null;
+                                  })()}
+                                </div>
                               </td>
 
                               {/* Category */}
