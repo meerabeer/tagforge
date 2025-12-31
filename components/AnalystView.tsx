@@ -160,7 +160,10 @@ export default function AnalystView() {
             };
 
             // Get total specific to this export
-            const { count } = await buildQuery().select('*', { count: 'exact', head: true });
+            let countQuery = supabase.from('v_main_inventory_audit').select('*', { count: 'exact', head: true });
+            if (debouncedSearch.site) countQuery = countQuery.ilike('site_id', `%${debouncedSearch.site}%`);
+            if (debouncedSearch.serial) countQuery = countQuery.ilike('serial_number', `%${debouncedSearch.serial}%`);
+            const { count } = await countQuery;
             const totalToFetch = count || 0;
 
             while (hasMore) {
@@ -296,19 +299,20 @@ export default function AnalystView() {
                                     <th className="px-4 py-3 border-b text-center">Serial Photo</th>
                                     <th className="px-4 py-3 border-b">Tag ID</th>
                                     <th className="px-4 py-3 border-b text-center">Tag Photo</th>
+                                    <th className="px-4 py-3 border-b">Tag Category</th>
                                     <th className="px-4 py-3 border-b">Audit</th>
                                 </tr>
                             </thead>
                             <tbody className="text-sm divide-y divide-slate-100">
                                 {loading ? (
                                     <tr>
-                                        <td colSpan={9} className="px-4 py-12 text-center text-slate-500">
+                                        <td colSpan={10} className="px-4 py-12 text-center text-slate-500">
                                             Loading inventory data...
                                         </td>
                                     </tr>
                                 ) : data.length === 0 ? (
                                     <tr>
-                                        <td colSpan={9} className="px-4 py-12 text-center text-slate-500">
+                                        <td colSpan={10} className="px-4 py-12 text-center text-slate-500">
                                             No records found matching your filters.
                                         </td>
                                     </tr>
@@ -372,6 +376,7 @@ export default function AnalystView() {
                                                     </div>
                                                 ) : <span className="text-slate-300">-</span>}
                                             </td>
+                                            <td className="px-4 py-2 text-slate-600">{row.tag_category || '-'}</td>
                                             <td className="px-4 py-2 text-xs text-slate-500">
                                                 <div><span className="font-semibold">Upd:</span> {row.updated_by_name}</div>
                                                 <div><span className="font-semibold">By:</span> {row.created_by_name}</div>
