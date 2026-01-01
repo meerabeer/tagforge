@@ -852,27 +852,42 @@ export default function NFOView() {
     setUploadError(null);
 
     try {
-      // 1. Compress image on client
+      // 1. Try to compress image on client (with fallback to original if compression fails)
+      let fileToUpload: Blob = file;
+      let originalSizeKB = Number((file.size / 1024).toFixed(2));
+      let compressedSizeKB = originalSizeKB;
+
       console.log('[UPLOAD] Starting compression...');
-      const { compressedFile, originalSizeKB, compressedSizeKB } = await compressImage(file);
+      try {
+        const compressionResult = await compressImage(file);
+        fileToUpload = compressionResult.compressedFile;
+        originalSizeKB = compressionResult.originalSizeKB;
+        compressedSizeKB = compressionResult.compressedSizeKB;
 
-      console.log('[UPLOAD-COMPRESS]', {
-        originalSizeKB,
-        compressedSizeKB,
-        compressedType: compressedFile.type,
-        compressedSize: compressedFile.size,
-      });
+        console.log('[UPLOAD-COMPRESS] Success:', {
+          originalSizeKB,
+          compressedSizeKB,
+          compressedType: fileToUpload.type,
+          compressedSize: fileToUpload.size,
+        });
+      } catch (compressionError) {
+        // Compression failed - use original file instead
+        console.warn('[UPLOAD-COMPRESS] Compression failed, using original file:', compressionError);
+        fileToUpload = file;
+        // Continue with upload - don't throw
+      }
 
-      // Check if compression produced a valid file
-      if (!compressedFile || compressedFile.size === 0) {
-        throw new Error('Compression produced empty file');
+      // Check if we have a valid file to upload
+      if (!fileToUpload || fileToUpload.size === 0) {
+        throw new Error('No valid file to upload');
       }
 
       setUploadProgress(`Uploading (${originalSizeKB}KB -> ${compressedSizeKB}KB)...`);
 
+
       // 2. Build FormData for server upload
       const formData = new FormData();
-      formData.append('file', compressedFile, 'image.jpg');
+      formData.append('file', fileToUpload, 'image.jpg');
       formData.append('siteId', activeSiteCanonical);
       formData.append('rowId', rowId);
       formData.append('kind', kind);
