@@ -836,13 +836,38 @@ export default function NFOView() {
   const handleFileUpload = async (file: File, rowId: string, kind: 'serial' | 'tag') => {
     if (!activeSiteCanonical) return;
 
+    // === DIAGNOSTIC: Log file info ===
+    console.log('[UPLOAD-START]', {
+      fileName: file.name,
+      fileType: file.type,
+      fileSizeKB: (file.size / 1024).toFixed(2),
+      rowId,
+      kind,
+      siteId: activeSiteCanonical,
+      userAgent: navigator.userAgent,
+    });
+
     setUploadingField({ rowId, field: kind });
     setUploadProgress('Compressing...');
     setUploadError(null);
 
     try {
       // 1. Compress image on client
+      console.log('[UPLOAD] Starting compression...');
       const { compressedFile, originalSizeKB, compressedSizeKB } = await compressImage(file);
+
+      console.log('[UPLOAD-COMPRESS]', {
+        originalSizeKB,
+        compressedSizeKB,
+        compressedType: compressedFile.type,
+        compressedSize: compressedFile.size,
+      });
+
+      // Check if compression produced a valid file
+      if (!compressedFile || compressedFile.size === 0) {
+        throw new Error('Compression produced empty file');
+      }
+
       setUploadProgress(`Uploading (${originalSizeKB}KB -> ${compressedSizeKB}KB)...`);
 
       // 2. Build FormData for server upload
@@ -852,18 +877,39 @@ export default function NFOView() {
       formData.append('rowId', rowId);
       formData.append('kind', kind);
 
+      console.log('[UPLOAD] Sending to server...');
+
       // 3. POST to server-side upload route
       const uploadRes = await fetch('/api/r2/upload', {
         method: 'POST',
         body: formData,
       });
 
+      console.log('[UPLOAD-RESPONSE]', {
+        status: uploadRes.status,
+        ok: uploadRes.ok,
+        statusText: uploadRes.statusText,
+      });
+
       if (!uploadRes.ok) {
-        const err = await uploadRes.json();
-        throw new Error(err.error || 'Upload failed');
+        const errText = await uploadRes.text();
+        console.error('[UPLOAD-ERROR] Server returned error:', errText);
+        let errMsg = 'Upload failed';
+        try {
+          const errJson = JSON.parse(errText);
+          errMsg = errJson.error || errMsg;
+        } catch { /* ignore parse error */ }
+        throw new Error(errMsg);
       }
 
-      const { publicUrl, dbUpdated } = await uploadRes.json();
+      const responseData = await uploadRes.json();
+      console.log('[UPLOAD-SUCCESS]', responseData);
+
+      const { publicUrl, dbUpdated, key } = responseData;
+
+      if (!publicUrl) {
+        throw new Error('Server did not return publicUrl');
+      }
 
       // 4. Update local UI state
       const urlField = kind === 'serial' ? 'serial_pic_url' : 'tag_pic_url';
@@ -871,6 +917,7 @@ export default function NFOView() {
       if (draftRow && draftRow.id === rowId) {
         // Update draft state for new/editing rows
         setDraftRow(prev => prev ? ({ ...prev, [urlField]: publicUrl }) : null);
+        console.log('[UPLOAD] Updated draft row with URL');
       }
 
       // Update allSiteRows state so "View" link appears immediately
@@ -879,23 +926,32 @@ export default function NFOView() {
           ...r,
           [urlField]: publicUrl
         }) : r));
+        console.log('[UPLOAD] Updated allSiteRows with URL');
       }
 
       // If server didn't update DB (for NEW_TEMP_ID), we'll handle it on row save
       if (!dbUpdated && rowId === 'NEW_TEMP_ID') {
-        console.log('[Upload] URL stored in draft, will persist on save');
+        console.log('[UPLOAD] URL stored in draft, will persist on save');
       }
+
+      console.log('[UPLOAD-COMPLETE] Success! Key:', key, 'URL:', publicUrl);
 
       setUploadProgress(null);
       setUploadingField(null);
 
     } catch (err) {
-      console.error('Upload error:', err);
-      setUploadError(err instanceof Error ? err.message : 'Upload failed');
+      console.error('[UPLOAD-FAILED]', err);
+      const errorMsg = err instanceof Error ? err.message : 'Upload failed';
+      setUploadError(errorMsg);
       setUploadProgress(null);
+
+      // Show alert for mobile debugging (remove after debugging)
+      alert(`Upload failed: ${errorMsg}\n\nCheck browser console for details.`);
+
       setTimeout(() => setUploadingField(null), 3000);
     }
   };
+
 
 
   const handleDeleteRow = async (rowId: string) => {
