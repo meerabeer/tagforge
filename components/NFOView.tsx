@@ -836,80 +836,54 @@ export default function NFOView() {
   const handleFileUpload = async (file: File, rowId: string, kind: 'serial' | 'tag') => {
     if (!activeSiteCanonical) return;
 
-    // Safety check: if adding new row, we need a real ID first? 
-    // Actually, preserving "NEW_TEMP_ID" logic: we can't upload to a path with "NEW_TEMP_ID" if we want it to persist properly?
-    // User requirement: "sites/<safeSiteId>/<rowId>/<kind>.jpg"
-    // If rowId is NEW_TEMP_ID, it might collide or be temporary.
-    // However, for UX, maybe we allow it and user saves? 
-    // But if they don't save, we have orphaned file.
-    // Better: Only allow upload if row has real ID? 
-    // Or just use the NEW_TEMP_ID and if it saves, we are good.
-    // Let's use whatever ID we have.
-
     setUploadingField({ rowId, field: kind });
     setUploadProgress('Compressing...');
     setUploadError(null);
 
     try {
-      // 1. Compress
+      // 1. Compress image on client
       const { compressedFile, originalSizeKB, compressedSizeKB } = await compressImage(file);
       setUploadProgress(`Uploading (${originalSizeKB}KB -> ${compressedSizeKB}KB)...`);
 
-      // 2. Presign
-      const presignRes = await fetch('/api/r2/presign', {
+      // 2. Build FormData for server upload
+      const formData = new FormData();
+      formData.append('file', compressedFile, 'image.jpg');
+      formData.append('siteId', activeSiteCanonical);
+      formData.append('rowId', rowId);
+      formData.append('kind', kind);
+
+      // 3. POST to server-side upload route
+      const uploadRes = await fetch('/api/r2/upload', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          siteId: activeSiteCanonical,
-          rowId: rowId,
-          kind: kind,
-          contentType: compressedFile.type, // 'image/jpeg'
-        }),
-      });
-
-      if (!presignRes.ok) {
-        const err = await presignRes.json();
-        throw new Error(err.error || 'Presign failed');
-      }
-
-      const { uploadUrl, publicUrl } = await presignRes.json();
-
-      // 3. Upload to R2
-      const uploadRes = await fetch(uploadUrl, {
-        method: 'PUT',
-        headers: {
-          'Content-Type': compressedFile.type,
-        },
-        body: compressedFile,
+        body: formData,
       });
 
       if (!uploadRes.ok) {
-        throw new Error('Upload to storage failed');
+        const err = await uploadRes.json();
+        throw new Error(err.error || 'Upload failed');
       }
 
-      // 4. Update State (Draft or Row)
-      if (draftRow && draftRow.id === rowId) {
-        setDraftRow(prev => prev ? ({
-          ...prev,
-          [kind === 'serial' ? 'serial_pic_url' : 'tag_pic_url']: publicUrl
-        }) : null);
-      } else {
-        // Direct update if not editing? But we usually edit to change things.
-        // If we are just clicking upload button on a row, maybe we should update the DB directly too?
-        // The user said "Update the existing upload flow".
-        // Assuming we are in edit mode when uploading.
-        // If we are NOT in edit mode, we might want to trigger an update.
-        // For now, let's assume we are in edit mode or we update DB if it's a saved row.
+      const { publicUrl, dbUpdated } = await uploadRes.json();
 
-        if (rowId !== 'NEW_TEMP_ID') {
-          await updateMainInventoryRow(rowId, {
-            [kind === 'serial' ? 'serial_pic_url' : 'tag_pic_url']: publicUrl
-          });
-          setAllSiteRows(prev => prev.map(r => r.id === rowId ? ({
-            ...r,
-            [kind === 'serial' ? 'serial_pic_url' : 'tag_pic_url']: publicUrl
-          }) : r));
-        }
+      // 4. Update local UI state
+      const urlField = kind === 'serial' ? 'serial_pic_url' : 'tag_pic_url';
+
+      if (draftRow && draftRow.id === rowId) {
+        // Update draft state for new/editing rows
+        setDraftRow(prev => prev ? ({ ...prev, [urlField]: publicUrl }) : null);
+      }
+
+      // Update allSiteRows state so "View" link appears immediately
+      if (rowId !== 'NEW_TEMP_ID') {
+        setAllSiteRows(prev => prev.map(r => r.id === rowId ? ({
+          ...r,
+          [urlField]: publicUrl
+        }) : r));
+      }
+
+      // If server didn't update DB (for NEW_TEMP_ID), we'll handle it on row save
+      if (!dbUpdated && rowId === 'NEW_TEMP_ID') {
+        console.log('[Upload] URL stored in draft, will persist on save');
       }
 
       setUploadProgress(null);
@@ -919,11 +893,10 @@ export default function NFOView() {
       console.error('Upload error:', err);
       setUploadError(err instanceof Error ? err.message : 'Upload failed');
       setUploadProgress(null);
-      // Keep uploadingField set to show error? Or clear it?
-      // Let's clear after delay or let user retry.
       setTimeout(() => setUploadingField(null), 3000);
     }
   };
+
 
   const handleDeleteRow = async (rowId: string) => {
     if (!confirm('Are you sure you want to delete this row permanently?')) return;
