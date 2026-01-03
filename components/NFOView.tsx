@@ -22,6 +22,7 @@ interface InventoryRow {
   tag_category: string | null;
   serial_pic_url: string | null;
   tag_pic_url: string | null;
+  photo_category: string | null;
   updated_at: string | null;
 }
 
@@ -134,6 +135,7 @@ export default function NFOView() {
   const [tagCategoryOptions, setTagCategoryOptions] = useState<string[]>([]);
   const [tagCategoryLoading, setTagCategoryLoading] = useState(true);
   const [tagCategoryError, setTagCategoryError] = useState(false);
+  const [photoCategoryOptions, setPhotoCategoryOptions] = useState<string[]>([]);
 
   // Upload State
   const [uploadingField, setUploadingField] = useState<{ rowId: string; field: 'serial' | 'tag' } | null>(null);
@@ -254,6 +256,23 @@ export default function NFOView() {
     loadTagCategories();
   }, []);
 
+  useEffect(() => {
+    const loadPhotoCategories = async () => {
+      try {
+        const { data, error } = await supabase
+          .from('photo_category_helper')
+          .select('value, sort_order')
+          .order('sort_order', { ascending: true });
+
+        if (error) throw error;
+        setPhotoCategoryOptions((data || []).map((i: any) => i.value));
+      } catch (err) {
+        console.error('Failed to load photo categories:', err);
+      }
+    };
+    loadPhotoCategories();
+  }, []);
+
   // --- CORE SEARCH LOGIC ---
 
   const fetchInventorySuggestions = async (input: string) => {
@@ -332,7 +351,7 @@ export default function NFOView() {
       const { data, error: queryError } = await supabase
         .from('main_inventory')
         .select(
-          'id, site_id, site_id_canonical, sheet_source, category, equipment_type, product_name, product_number, serial_number, tag_id, tag_category, serial_pic_url, tag_pic_url, updated_at'
+          'id, site_id, site_id_canonical, sheet_source, category, equipment_type, product_name, product_number, serial_number, tag_id, tag_category, photo_category, serial_pic_url, tag_pic_url, updated_at'
         )
         .eq('site_id_canonical', canonical)
         .order('updated_at', { ascending: false });
@@ -462,6 +481,7 @@ export default function NFOView() {
       tag_category: null,
       serial_pic_url: null,
       tag_pic_url: null,
+      photo_category: null,
       updated_at: null
     };
 
@@ -607,8 +627,30 @@ export default function NFOView() {
       setEditError(null);
     }
 
+    // Capture explicit draft creation for logging
+    const draft: InventoryRow = { ...row };
+
+    // A) Log original and draft as requested
+    console.log('[beginInlineEdit] START', {
+      rowId: row.id,
+      draftId: draft.id,
+      rowSerial: row.serial_number,
+      draftSerial: draft.serial_number,
+      rowTagId: row.tag_id,
+      draftTagId: draft.tag_id,
+      rowTagCat: row.tag_category,
+      draftTagCat: draft.tag_category,
+      // Casting to any to check for potential hidden ID fields at runtime
+      rowTagCatId: (row as any).tag_category_id,
+      draftTagCatId: (draft as any).tag_category_id,
+      rowPhotoCat: row.photo_category,
+      draftPhotoCat: draft.photo_category,
+      rowPhotoCatId: (row as any).photo_category_id,
+      draftPhotoCatId: (draft as any).photo_category_id,
+    });
+
     setEditingRowId(row.id);
-    setDraftRow({ ...row });
+    setDraftRow(draft);
     setOriginalRow({ ...row });
     setEditError(null);
     setIsAddingNew(false);
@@ -694,37 +736,100 @@ export default function NFOView() {
     const serial = (draft.serial_number || '').trim();
     const tagId = (draft.tag_id || '').trim();
 
-    // Use allSiteRows to check duplicates
-    const siteRows = allSiteRows.filter(r => {
-      const isSelfRow = !isNew && r.id === draft.id;
-      return !isSelfRow;
+    // 1) Optimization: If editing an existing row and critical fields are unchanged, skip check
+    if (!isNew && originalRow) {
+      const origSerial = (originalRow.serial_number || '').trim();
+      const origTag = (originalRow.tag_id || '').trim();
+
+      if (serial === origSerial && tagId === origTag) {
+        console.log('[checkDuplicates] Skipped: Serial and Tag unchanged vs Original.');
+        return { error: null, duplicateSerial: false, duplicateTag: false };
+      }
+    }
+
+    // 3) Print/log variables at runtime (keep existing logs)
+    console.log('Duplicate Check Debug:', {
+      mode: isNew ? 'insert' : 'update',
+      currentRowId: draft.id,
+      site_id: draft.site_id,
+      serial_number: serial,
+      tag_id: tagId,
+    });
+
+    if (!serial && !tagId) {
+      return { error: null, duplicateSerial: false, duplicateTag: false };
+    }
+
+    // 2) Build Winner Maps (Global Dedup across all rows for this site)
+    // allSiteRows is already sorted by updated_at DESC (so first seen is winner)
+    const winnerSerialMap = new Map<string, InventoryRow>();
+    const winnerTagMap = new Map<string, InventoryRow>();
+
+    allSiteRows.forEach(row => {
+      const rowSite = (row.site_id || '').trim();
+
+      const rowSerial = (row.serial_number || '').trim().toLowerCase();
+      if (rowSerial) {
+        const key = `${rowSite}|${rowSerial}`;
+        if (!winnerSerialMap.has(key)) {
+          winnerSerialMap.set(key, row);
+        }
+      }
+
+      const rowTag = (row.tag_id || '').trim().toLowerCase();
+      if (rowTag) {
+        const key = `${rowSite}|${rowTag}`;
+        if (!winnerTagMap.has(key)) {
+          winnerTagMap.set(key, row);
+        }
+      }
     });
 
     let hasDuplicateSerial = false;
     let hasDuplicateTag = false;
     const errors: string[] = [];
+    const draftSite = (draft.site_id || '').trim();
 
-    // Check duplicate serial (only if non-empty)
+    // Check duplicate serial
     if (serial) {
-      const serialLower = serial.toLowerCase();
-      hasDuplicateSerial = siteRows.some(r => {
-        const existingSerial = (r.serial_number || '').trim().toLowerCase();
-        return existingSerial && existingSerial === serialLower;
-      });
-      if (hasDuplicateSerial) {
-        errors.push('Duplicate Serial Number already exists in this Site ID.');
+      const serialKey = `${draftSite}|${serial.toLowerCase()}`;
+      const match = winnerSerialMap.get(serialKey);
+
+      // If match exists AND it is NOT the current row (draft.id)
+      if (match && match.id !== draft.id) {
+        hasDuplicateSerial = true;
+        console.log('[checkDuplicates] Serial Conflict Row:', {
+          matchId: match.id,
+          matchSheet: match.sheet_source,
+          matchSite: match.site_id,
+          matchEquipType: match.equipment_type,
+          matchProduct: match.product_name,
+          matchProductNumber: match.product_number,
+          matchSerial: match.serial_number,
+          matchTagId: match.tag_id,
+        });
+        errors.push(`Duplicate Serial Number "${serial}" already exists.`);
       }
     }
 
-    // Check duplicate tag_id (only if non-empty)
+    // Check duplicate tag_id
     if (tagId) {
-      const tagIdLower = tagId.toLowerCase();
-      hasDuplicateTag = siteRows.some(r => {
-        const existingTagId = (r.tag_id || '').trim().toLowerCase();
-        return existingTagId && existingTagId === tagIdLower;
-      });
-      if (hasDuplicateTag) {
-        errors.push('Duplicate Tag ID already exists in this Site ID.');
+      const tagKey = `${draftSite}|${tagId.toLowerCase()}`;
+      const match = winnerTagMap.get(tagKey);
+
+      if (match && match.id !== draft.id) {
+        hasDuplicateTag = true;
+        console.log('[checkDuplicates] Tag ID Conflict Row:', {
+          matchId: match.id,
+          matchSheet: match.sheet_source,
+          matchSite: match.site_id,
+          matchEquipType: match.equipment_type,
+          matchProduct: match.product_name,
+          matchProductNumber: match.product_number,
+          matchSerial: match.serial_number,
+          matchTagId: match.tag_id,
+        });
+        errors.push(`Duplicate Tag ID "${tagId}" already exists.`);
       }
     }
 
@@ -792,6 +897,7 @@ export default function NFOView() {
             serial_number: draftRow.serial_number,
             tag_id: draftRow.tag_id,
             tag_category: draftRow.tag_category,
+            photo_category: draftRow.photo_category,
             serial_pic_url: draftRow.serial_pic_url,
             tag_pic_url: draftRow.tag_pic_url
           })
@@ -804,7 +910,12 @@ export default function NFOView() {
         setAllSiteRows((prev) => [data, ...prev]);
       } else {
         const existingSourceNorm = normalizeSheetSource(draftRow.sheet_source);
-        const nextSheetSource = existingSourceNorm === 'manual_added' ? 'Manual_added' : 'Manual_edited';
+        // If photo_category is set, force to Manual_verified
+        let nextSheetSource = existingSourceNorm === 'manual_added' ? 'Manual_added' : 'Manual_edited';
+
+        if (draftRow.photo_category) {
+          nextSheetSource = 'Manual_verified';
+        }
 
         // UPDATE existing row
         await updateMainInventoryRow(draftRow.id, {
@@ -816,6 +927,7 @@ export default function NFOView() {
           serial_number: draftRow.serial_number,
           tag_id: draftRow.tag_id,
           tag_category: draftRow.tag_category,
+          photo_category: draftRow.photo_category,
           serial_pic_url: draftRow.serial_pic_url,
           tag_pic_url: draftRow.tag_pic_url
         });
@@ -1027,6 +1139,45 @@ export default function NFOView() {
     }
   };
 
+  const handleVerifyRow = async (rowId: string) => {
+    try {
+      // Optimistic update
+      setAllSiteRows(prev => prev.map(r => r.id === rowId ? { ...r, sheet_source: 'Manual_verified' } : r));
+      await updateMainInventoryRow(rowId, { sheet_source: 'Manual_verified' });
+    } catch (err) {
+      console.error('Verify failed:', err);
+      // Revert if needed, but low risk
+    }
+  };
+
+  // Global Key Listener for Delete
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      // If pressing Del and we have an editing row that is NOT "NEW_TEMP_ID" (or maybe we allow deleting new?)
+      // The user likely means selecting a row? Or just when hovering? 
+      // "when i am pressing Del its not giving me popup to del"
+      // Usually implies selecting a row first. But we don't have row selection state.
+      // Maybe they mean while editing?
+      // Or maybe there WAS a selection state I missed?
+      // I don't see row selection state (checkboxes). 
+      // Maybe they mean when they click "Delete Row" button?
+      // "pressing Del" -> implies keyboard. 
+      // If there's no selection, 'Del' is ambiguous. 
+      // I will assume they mean *While Editing* (since editingRowId exists).
+
+      const isInput = ['INPUT', 'TEXTAREA', 'SELECT'].includes((document.activeElement?.tagName || '').toUpperCase());
+
+      // Allow Ctrl+Delete regardless of focus, OR Delete key if NOT in an input
+      if ((e.key === 'Delete' && e.ctrlKey) || (e.key === 'Delete' && !isInput)) {
+        if (editingRowId && editingRowId !== 'NEW_TEMP_ID') {
+          handleDeleteRow(editingRowId);
+        }
+      }
+    };
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [editingRowId]);
+
   return (
     <main className="min-h-screen bg-slate-50">
       <div className="max-w-screen-2xl mx-auto px-4 sm:px-6 py-4">
@@ -1180,13 +1331,14 @@ export default function NFOView() {
                     <thead className="bg-slate-100">
                       <tr>
                         <th className="px-2 py-1.5 text-left text-xs font-semibold text-slate-700 uppercase tracking-wide" style={{ width: '90px' }}>Sheet</th>
-                        <th className="px-2 py-1.5 text-left text-xs font-semibold text-slate-700 uppercase tracking-wide" style={{ width: '130px' }}>Category</th>
+                        {/* Category column removed */}
                         <th className="px-2 py-1.5 text-left text-xs font-semibold text-slate-700 uppercase tracking-wide" style={{ width: '140px' }}>Equipment Type</th>
                         <th className="px-2 py-1.5 text-left text-xs font-semibold text-slate-700 uppercase tracking-wide" style={{ width: '160px' }}>Product Name</th>
                         <th className="px-2 py-1.5 text-left text-xs font-semibold text-slate-700 uppercase tracking-wide" style={{ width: '120px' }}>Product #</th>
                         <th className="px-2 py-1.5 text-left text-xs font-semibold text-slate-700 uppercase tracking-wide" style={{ width: '110px' }}>Serial #</th>
                         <th className="px-2 py-1.5 text-left text-xs font-semibold text-slate-700 uppercase tracking-wide" style={{ width: '90px' }}>Tag ID</th>
                         <th className="px-2 py-1.5 text-left text-xs font-semibold text-slate-700 uppercase tracking-wide" style={{ width: '120px' }}>Tag Category</th>
+                        <th className="px-2 py-1.5 text-left text-xs font-semibold text-slate-700 uppercase tracking-wide" style={{ width: '140px' }}>Photo Category</th>
                         <th className="px-2 py-1.5 text-center text-xs font-semibold text-slate-700 uppercase tracking-wide" style={{ width: '130px' }}>Actions</th>
                       </tr>
                     </thead>
@@ -1199,22 +1351,7 @@ export default function NFOView() {
                               <span className="inline-block px-2 py-0.5 bg-green-600 text-white rounded text-xs font-bold">NEW</span>
                             </td>
 
-                            {/* Category */}
-                            <td className="px-2 py-1.5 text-xs text-slate-800">
-                              <select
-                                value={draftRow.category || ''}
-                                onChange={(e) => updateDraftField('category', e.target.value || null)}
-                                className="w-full h-7 px-1.5 py-0.5 border border-slate-300 rounded text-xs bg-white focus:outline-none focus:ring-1 focus:ring-blue-500"
-                                disabled={saving || (activeTab !== 'All')}
-                              >
-                                <option value="">Select</option>
-                                {(activeTab === 'All' ? cascadeMaps.categories : [activeTab]).map((cat) => (
-                                  <option key={cat} value={cat}>
-                                    {cat}
-                                  </option>
-                                ))}
-                              </select>
-                            </td>
+                            {/* Category hidden/removed */}
 
                             {/* Equipment Type */}
                             <td className="px-2 py-1.5 text-xs text-slate-800">
@@ -1393,8 +1530,21 @@ export default function NFOView() {
                                 </select>
                               )}
                             </td>
+                            {/* Photo Category (previously Actions comment was here but shifting) */}
+                            <td className="px-2 py-1.5 text-xs text-slate-800">
+                              <select
+                                value={draftRow.photo_category || ''}
+                                onChange={(e) => updateDraftField('photo_category', e.target.value || null)}
+                                className="w-full h-7 px-1.5 py-0.5 border border-slate-300 rounded text-xs bg-white focus:outline-none focus:ring-1 focus:ring-blue-500"
+                                disabled={saving}
+                              >
+                                <option value="">Select</option>
+                                {photoCategoryOptions.map((opt) => (
+                                  <option key={opt} value={opt}>{opt}</option>
+                                ))}
+                              </select>
+                            </td>
 
-                            {/* Actions */}
                             <td className="px-2 py-1.5 text-center text-xs space-x-2">
                               <button
                                 onClick={saveInlineUpdate}
@@ -1430,10 +1580,10 @@ export default function NFOView() {
                       {/* Existing rows */}
                       {visibleRows.map((row) => {
                         const isEditing = editingRowId === row.id;
-                        const isManual = row.sheet_source === 'Manual_added' || row.sheet_source === 'Manual_edited';
+                        const isManual = row.sheet_source === 'Manual_added' || row.sheet_source === 'Manual_edited' || row.sheet_source === 'Manual_verified';
                         const rowClass = isEditing
                           ? 'bg-blue-50 border-2 border-blue-400'
-                          : (isManual ? 'bg-amber-50 hover:bg-amber-100' : 'hover:bg-slate-50');
+                          : (isManual ? 'bg-green-50 hover:bg-green-100' : 'hover:bg-slate-50');
 
                         return (
                           <React.Fragment key={row.id}>
@@ -1445,21 +1595,9 @@ export default function NFOView() {
                                     {(draftRow?.sheet_source || row.sheet_source)?.substring(0, 12)}
                                   </td>
 
-                                  <td className="px-2 py-1.5 text-xs text-slate-800">
-                                    <select
-                                      value={draftRow?.category || ''}
-                                      onChange={(e) => updateDraftField('category', e.target.value || null)}
-                                      className="w-full h-7 px-1.5 py-0.5 border border-slate-300 rounded text-xs bg-white focus:outline-none focus:ring-1 focus:ring-blue-500"
-                                      disabled={saving}
-                                    >
-                                      <option value="">Select</option>
-                                      {cascadeMaps.categories.map((cat) => (
-                                        <option key={cat} value={cat}>
-                                          {cat}
-                                        </option>
-                                      ))}
-                                    </select>
-                                  </td>
+
+
+                                  {/* Category hidden */}
 
                                   <td className="px-2 py-1.5 text-xs text-slate-800">
                                     <select
@@ -1613,6 +1751,20 @@ export default function NFOView() {
                                     )}
                                   </td>
 
+                                  <td className="px-2 py-1.5 text-xs text-slate-800">
+                                    <select
+                                      value={draftRow?.photo_category || ''}
+                                      onChange={(e) => updateDraftField('photo_category', e.target.value || null)}
+                                      className="w-full h-7 px-1.5 py-0.5 border border-slate-300 rounded text-xs bg-white focus:outline-none focus:ring-1 focus:ring-blue-500"
+                                      disabled={saving}
+                                    >
+                                      <option value="">Select</option>
+                                      {photoCategoryOptions.map((opt) => (
+                                        <option key={opt} value={opt}>{opt}</option>
+                                      ))}
+                                    </select>
+                                  </td>
+
                                   <td className="px-2 py-1.5 text-center text-xs space-x-2">
                                     <button
                                       onClick={saveInlineUpdate}
@@ -1646,7 +1798,7 @@ export default function NFOView() {
                                       {row.sheet_source}
                                     </span>
                                   </td>
-                                  <td className="px-2 py-1.5 text-xs text-slate-800">{row.category}</td>
+                                  {/* Category hidden */}
                                   <td className="px-2 py-1.5 text-xs text-slate-800">{row.equipment_type}</td>
                                   <td className="px-2 py-1.5 text-xs text-slate-800">{row.product_name}</td>
                                   <td className="px-2 py-1.5 text-xs font-mono text-slate-600">{row.product_number}</td>
@@ -1691,6 +1843,7 @@ export default function NFOView() {
                                     )}
                                   </td>
                                   <td className="px-2 py-1.5 text-xs text-slate-800">{row.tag_category}</td>
+                                  <td className="px-2 py-1.5 text-xs text-slate-800">{row.photo_category}</td>
                                   <td className="px-2 py-1.5 text-center text-xs">
                                     <button
                                       onClick={() => beginInlineEdit(row)}
@@ -1709,6 +1862,8 @@ export default function NFOView() {
                                         ✕
                                       </button>
                                     )}
+                                    {/* Link for Verify - Only show if not already verified */}
+
                                   </td>
                                 </>
                               )}

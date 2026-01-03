@@ -11,6 +11,7 @@ export type MainInventoryUpdatePatch = {
   tag_category?: string | null;
   serial_pic_url?: string | null;
   tag_pic_url?: string | null;
+  photo_category?: string | null;
 };
 
 export async function updateMainInventoryRow(id: string, patch: MainInventoryUpdatePatch): Promise<void> {

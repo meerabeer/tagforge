@@ -22,6 +22,7 @@ interface InventoryRow {
     updated_by_name: string | null;
     updated_at: string | null;
     sheet_source: string | null;
+    planned_date?: string; // Fetched separately
 }
 
 export default function AnalystView() {
@@ -113,7 +114,28 @@ export default function AnalystView() {
 
             if (error) throw error;
 
-            setData(rows || []);
+            let finalRows = (rows as InventoryRow[]) || [];
+
+            // Fetch Planned Dates for these sites
+            if (finalRows.length > 0) {
+                const siteIds = Array.from(new Set(finalRows.map(r => r.site_id)));
+                const { data: plans } = await supabase
+                    .from('pmr_plan_2026_sheet1')
+                    .select('site_id, planned_date')
+                    .in('site_id', siteIds);
+
+                if (plans) {
+                    const planMap = new Map();
+                    plans.forEach((p: any) => planMap.set(p.site_id, p.planned_date));
+
+                    finalRows = finalRows.map(r => ({
+                        ...r,
+                        planned_date: planMap.get(r.site_id)
+                    }));
+                }
+            }
+
+            setData(finalRows);
             setTotalCount(count || 0);
 
         } catch (err) {
@@ -292,6 +314,7 @@ export default function AnalystView() {
                             <thead className="bg-slate-50 text-xs uppercase text-slate-500 font-semibold">
                                 <tr>
                                     <th className="px-4 py-3 border-b">Site ID</th>
+                                    <th className="px-4 py-3 border-b">Planned</th>
                                     <th className="px-4 py-3 border-b">Category</th>
                                     <th className="px-4 py-3 border-b">Equipment</th>
                                     <th className="px-4 py-3 border-b">Product</th>
@@ -300,6 +323,7 @@ export default function AnalystView() {
                                     <th className="px-4 py-3 border-b">Tag ID</th>
                                     <th className="px-4 py-3 border-b text-center">Tag Photo</th>
                                     <th className="px-4 py-3 border-b">Tag Category</th>
+                                    <th className="px-4 py-3 border-b">Source</th>
                                     <th className="px-4 py-3 border-b">Audit</th>
                                 </tr>
                             </thead>
@@ -320,6 +344,9 @@ export default function AnalystView() {
                                     data.map(row => (
                                         <tr key={row.id} className="hover:bg-slate-50">
                                             <td className="px-4 py-2 font-medium text-slate-900">{row.site_id}</td>
+                                            <td className="px-4 py-2 text-slate-500 text-xs">
+                                                {row.planned_date ? new Date(row.planned_date).toLocaleDateString() : '-'}
+                                            </td>
                                             <td className="px-4 py-2 text-slate-600">{row.category}</td>
                                             <td className="px-4 py-2 text-slate-600">{row.equipment_type}</td>
                                             <td className="px-4 py-2 text-slate-600">
@@ -377,6 +404,14 @@ export default function AnalystView() {
                                                 ) : <span className="text-slate-300">-</span>}
                                             </td>
                                             <td className="px-4 py-2 text-slate-600">{row.tag_category || '-'}</td>
+                                            <td className="px-4 py-2 text-slate-600">
+                                                <span className={`inline-flex items-center px-2 py-0.5 rounded text-xs font-medium ${row.sheet_source === 'manual_edited' || row.sheet_source === 'manual_added'
+                                                    ? 'bg-green-100 text-green-800'
+                                                    : 'bg-slate-100 text-slate-800'
+                                                    }`}>
+                                                    {row.sheet_source || 'Original'}
+                                                </span>
+                                            </td>
                                             <td className="px-4 py-2 text-xs text-slate-500">
                                                 <div><span className="font-semibold">Upd:</span> {row.updated_by_name}</div>
                                                 <div><span className="font-semibold">By:</span> {row.created_by_name}</div>

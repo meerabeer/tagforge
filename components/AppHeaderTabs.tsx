@@ -12,7 +12,8 @@ export default function AppHeaderTabs() {
 
     // Determine active tab based on path prefix
     const isAnalyst = pathname?.startsWith('/analyst');
-    const isNFO = !isAnalyst;
+    const isPMR = pathname?.startsWith('/pmr');
+    const isNFO = !isAnalyst && !isPMR;
 
     // Preserve 'site' parameter when switching tabs
     const siteParam = searchParams.get('site');
@@ -53,6 +54,15 @@ export default function AppHeaderTabs() {
                                 }`}
                         >
                             Analyst
+                        </Link>
+                        <Link
+                            href={`/pmr${queryFooter}`}
+                            className={`px-4 py-2 text-sm font-medium rounded-md transition-colors ${isPMR
+                                ? 'bg-white text-blue-700 shadow-sm'
+                                : 'text-slate-600 hover:text-slate-900 hover:bg-slate-200'
+                                }`}
+                        >
+                            Plans
                         </Link>
                     </nav>
                 </div>
