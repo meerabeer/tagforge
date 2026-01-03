@@ -682,6 +682,7 @@ export default function NFOView() {
       tag_category: null,
       serial_pic_url: null,
       tag_pic_url: null,
+      photo_category: null,
       updated_at: null
     };
 
