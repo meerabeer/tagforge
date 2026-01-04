@@ -112,9 +112,11 @@ export default function NFOView() {
   const [originalRow, setOriginalRow] = useState<InventoryRow | null>(null);
   const [saving, setSaving] = useState(false);
   const [editError, setEditError] = useState<string | null>(null);
+  const [editWarning, setEditWarning] = useState<string | null>(null);
   const [expandedDetailsRowId, setExpandedDetailsRowId] = useState<string | null>(null);
   const [isAddingNew, setIsAddingNew] = useState(false);
   const [duplicateFields, setDuplicateFields] = useState<{ serial: boolean; tagId: boolean }>({ serial: false, tagId: false });
+  const [showHiddenDuplicates, setShowHiddenDuplicates] = useState(false);
 
   // Add New Site Modal State
   const [showAddSiteModal, setShowAddSiteModal] = useState(false);
@@ -524,46 +526,48 @@ export default function NFOView() {
       .join(' ');
   }, [activeRequirement]);
 
-  const { visibleRows, hiddenDuplicateCount } = useMemo(() => {
-    const normActiveTab = normalizeCategoryName(activeTab);
+  // Global Deduplication & Hidden Rows Calculation
+  // Global Duplicate Detection (Frequency counting)
+  const { visibleRowsInTab, serialCounts, tagCounts } = useMemo(() => {
+    const sCounts = new Map<string, number>();
+    const tCounts = new Map<string, number>();
 
-    const filteredByTab =
-      activeTab === 'All'
-        ? allSiteRows
-        : allSiteRows.filter((row) => normalizeCategoryName(row.category) === normActiveTab);
-
-    let hiddenNfoCount = 0;
-
-    const afterNfoFilter = filteredByTab.filter((row) => {
-      const catNorm = normalizeCategoryName(row.category);
-      const srcNorm = normalizeSheetSource(row.sheet_source);
-      const isMwOrRanActive = catNorm === 'mw-active' || catNorm === 'ran-active';
-      const isNfo = srcNorm === 'nfo_sheet';
-
-      if (isMwOrRanActive && isNfo) {
-        hiddenNfoCount += 1;
-        return false;
-      }
-      return true;
-    });
-
-    const seen = new Set<string>();
-    const deduped = afterNfoFilter.filter((row) => {
+    // 1. Check frequencies across ALL rows for this site
+    allSiteRows.forEach(row => {
       const site = (row.site_id || '').trim();
-      const serial = (row.serial_number || '').trim();
+      const serial = (row.serial_number || '').trim().toLowerCase();
+      const tag = (row.tag_id || '').trim().toLowerCase();
 
-      if (!serial) return true;
+      if (serial) {
+        const key = `${site}|${serial}`;
+        sCounts.set(key, (sCounts.get(key) || 0) + 1);
+      }
+      if (tag) {
+        const key = `${site}|${tag}`;
+        tCounts.set(key, (tCounts.get(key) || 0) + 1);
+      }
+    });
 
-      const key = `${site}__${serial}`;
-      if (seen.has(key)) return false;
-      seen.add(key);
+    // 2. Filter for current tab (Show ALL rows, including duplicates)
+    const normActiveTab = normalizeCategoryName(activeTab);
+    const visible = allSiteRows.filter(row => {
+      // Category Filter
+      if (activeTab !== 'All' && normalizeCategoryName(row.category) !== normActiveTab) return false;
       return true;
     });
 
-    const hiddenDupCount = afterNfoFilter.length - deduped.length;
-
-    return { visibleRows: deduped, hiddenDuplicateCount: hiddenDupCount };
+    return {
+      visibleRowsInTab: visible,
+      serialCounts: sCounts,
+      tagCounts: tCounts
+    };
   }, [activeTab, allSiteRows]);
+
+  /*
+  const { visibleRows, hiddenDuplicateCount } = useMemo(() => {
+    // ... OLD LOGIC REMOVED ...
+  }, [activeTab, allSiteRows]);
+  */
 
   const getEquipmentTypes = (category: string | null): string[] => {
     if (!category) return [];
@@ -625,9 +629,10 @@ export default function NFOView() {
       setDraftRow(null);
       setOriginalRow(null);
       setEditError(null);
+      setEditWarning(null);
     }
 
-    // Capture explicit draft creation for logging
+    // ... capture draft ...
     const draft: InventoryRow = { ...row };
 
     // A) Log original and draft as requested
@@ -653,6 +658,7 @@ export default function NFOView() {
     setDraftRow(draft);
     setOriginalRow({ ...row });
     setEditError(null);
+    setEditWarning(null);
     setIsAddingNew(false);
     setDuplicateFields({ serial: false, tagId: false });
   };
@@ -666,6 +672,7 @@ export default function NFOView() {
       setDraftRow(null);
       setOriginalRow(null);
       setEditError(null);
+      setEditWarning(null);
     }
 
     // Create new draft row
@@ -700,6 +707,7 @@ export default function NFOView() {
     setDraftRow(null);
     setOriginalRow(null);
     setEditError(null);
+    setEditWarning(null);
     setIsAddingNew(false);
     setDuplicateFields({ serial: false, tagId: false });
   };
@@ -799,17 +807,9 @@ export default function NFOView() {
       // If match exists AND it is NOT the current row (draft.id)
       if (match && match.id !== draft.id) {
         hasDuplicateSerial = true;
-        console.log('[checkDuplicates] Serial Conflict Row:', {
-          matchId: match.id,
-          matchSheet: match.sheet_source,
-          matchSite: match.site_id,
-          matchEquipType: match.equipment_type,
-          matchProduct: match.product_name,
-          matchProductNumber: match.product_number,
-          matchSerial: match.serial_number,
-          matchTagId: match.tag_id,
-        });
-        errors.push(`Duplicate Serial Number "${serial}" already exists.`);
+
+        let msg = `⚠ Serial "${serial}" already exists on this site (conflict row: ${match.id.substring(0, 8)}..., source: ${match.sheet_source})`;
+        errors.push(msg);
       }
     }
 
@@ -820,18 +820,14 @@ export default function NFOView() {
 
       if (match && match.id !== draft.id) {
         hasDuplicateTag = true;
-        console.log('[checkDuplicates] Tag ID Conflict Row:', {
-          matchId: match.id,
-          matchSheet: match.sheet_source,
-          matchSite: match.site_id,
-          matchEquipType: match.equipment_type,
-          matchProduct: match.product_name,
-          matchProductNumber: match.product_number,
-          matchSerial: match.serial_number,
-          matchTagId: match.tag_id,
-        });
-        errors.push(`Duplicate Tag ID "${tagId}" already exists.`);
+        let msg = `⚠ Tag ID "${tagId}" already exists on this site (conflict row: ${match.id.substring(0, 8)}..., source: ${match.sheet_source})`;
+        errors.push(msg);
       }
+    }
+
+    if (errors.length > 0) {
+      // Add actionable footer
+      errors.push(`Click '(N) duplicate hidden' to review.`);
     }
 
     return {
@@ -868,20 +864,24 @@ export default function NFOView() {
       }
     }
 
-    // Check for duplicates
+    // Check for duplicates (Non-blocking Warning)
     const duplicateCheck = checkDuplicates(draftRow, isAddingNew);
     if (duplicateCheck.error) {
-      setEditError(duplicateCheck.error);
+      setEditWarning(duplicateCheck.error);
       setDuplicateFields({
         serial: duplicateCheck.duplicateSerial,
         tagId: duplicateCheck.duplicateTag
       });
-      return;
+      // DO NOT RETURN. Proceed to save.
+    } else {
+      setEditWarning(null);
+      setDuplicateFields({ serial: false, tagId: false });
     }
 
     setSaving(true);
-    setEditError(null);
-    setDuplicateFields({ serial: false, tagId: false });
+    setEditError(null); // Clear errors
+    // Keep duplicateFields/warning for display during save if any
+
 
     try {
       if (isAddingNew) {
@@ -1299,11 +1299,8 @@ export default function NFOView() {
               <div className="text-sm text-slate-700">
                 <span className="font-semibold">{activeSiteCanonical}</span>
                 <span className="mx-2 text-slate-400">|</span>
-                Showing <span className="font-semibold">{visibleRows.length}</span> row
-                {visibleRows.length !== 1 ? 's' : ''}
-                {hiddenDuplicateCount > 0 && (
-                  <span className="text-slate-500"> ({hiddenDuplicateCount} duplicate{hiddenDuplicateCount !== 1 ? 's' : ''} hidden)</span>
-                )}
+                Showing <span className="font-semibold">{visibleRowsInTab.length}</span> row
+                {visibleRowsInTab.length !== 1 ? 's' : ''}
               </div>
               <button
                 onClick={beginAddNew}
@@ -1313,6 +1310,8 @@ export default function NFOView() {
                 + Add Row
               </button>
             </div>
+
+
 
             {allSiteRows.length === 0 && !isAddingNew ? (
               <div className="bg-white border border-slate-200 rounded-lg p-8 text-center text-slate-600">
@@ -1340,6 +1339,7 @@ export default function NFOView() {
                         <th className="px-2 py-1.5 text-left text-xs font-semibold text-slate-700 uppercase tracking-wide" style={{ width: '90px' }}>Tag ID</th>
                         <th className="px-2 py-1.5 text-left text-xs font-semibold text-slate-700 uppercase tracking-wide" style={{ width: '120px' }}>Tag Category</th>
                         <th className="px-2 py-1.5 text-left text-xs font-semibold text-slate-700 uppercase tracking-wide" style={{ width: '140px' }}>Photo Category</th>
+                        <th className="px-2 py-1.5 text-left text-xs font-semibold text-slate-700 uppercase tracking-wide" style={{ width: '120px' }}>Updated</th>
                         <th className="px-2 py-1.5 text-center text-xs font-semibold text-slate-700 uppercase tracking-wide" style={{ width: '130px' }}>Actions</th>
                       </tr>
                     </thead>
@@ -1411,7 +1411,8 @@ export default function NFOView() {
                                 type="text"
                                 value={draftRow.serial_number || ''}
                                 onChange={(e) => updateDraftField('serial_number', e.target.value)}
-                                className={`w-full h-7 px-1.5 py-0.5 border rounded text-xs font-mono focus:outline-none focus:ring-1 ${duplicateFields.serial ? 'border-red-500 bg-red-50 focus:ring-red-500' : 'border-slate-300 focus:ring-blue-500'}`}
+                                className={`w-full h-7 px-1.5 py-0.5 border rounded text-xs font-mono focus:outline-none focus:ring-1 
+                                  ${duplicateFields.serial ? 'border-amber-500 bg-amber-50 focus:ring-amber-500' : 'border-slate-300 focus:ring-blue-500'}`}
                                 disabled={saving}
                                 placeholder="Optional"
                               />
@@ -1461,7 +1462,8 @@ export default function NFOView() {
                                 type="text"
                                 value={draftRow.tag_id || ''}
                                 onChange={(e) => updateDraftField('tag_id', e.target.value)}
-                                className={`w-full h-7 px-1.5 py-0.5 border rounded text-xs font-mono focus:outline-none focus:ring-1 ${duplicateFields.tagId ? 'border-red-500 bg-red-50 focus:ring-red-500' : 'border-slate-300 focus:ring-blue-500'}`}
+                                className={`w-full h-7 px-1.5 py-0.5 border rounded text-xs font-mono focus:outline-none focus:ring-1 
+                                  ${duplicateFields.tagId ? 'border-amber-500 bg-amber-50 focus:ring-amber-500' : 'border-slate-300 focus:ring-blue-500'}`}
                                 disabled={saving}
                                 placeholder="Optional"
                               />
@@ -1545,6 +1547,8 @@ export default function NFOView() {
                                 ))}
                               </select>
                             </td>
+                            {/* Updated (Placeholder) */}
+                            <td className="px-2 py-1.5 text-xs text-slate-400 text-center">-</td>
 
                             <td className="px-2 py-1.5 text-center text-xs space-x-2">
                               <button
@@ -1575,16 +1579,43 @@ export default function NFOView() {
                               </td>
                             </tr>
                           )}
+                          {editWarning && (
+                            <tr className="bg-amber-50 border-l-2 border-r-2 border-b-2 border-blue-400">
+                              <td colSpan={9} className="px-4 py-2">
+                                <div className="flex items-center text-amber-700 text-xs">
+                                  <svg xmlns="http://www.w3.org/2000/svg" className="h-4 w-4 mr-2 flex-shrink-0" viewBox="0 0 20 20" fill="currentColor">
+                                    <path fillRule="evenodd" d="M8.257 3.099c.765-1.36 2.722-1.36 3.486 0l5.58 9.92c.75 1.334-.213 2.98-1.742 2.98H4.42c-1.53 0-2.493-1.646-1.743-2.98l5.58-9.92zM11 13a1 1 0 11-2 0 1 1 0 012 0zm-1-8a1 1 0 00-1 1v3a1 1 0 002 0V6a1 1 0 00-1-1z" clipRule="evenodd" />
+                                  </svg>
+                                  <span className="font-semibold mr-1">Warning:</span> {editWarning}
+                                </div>
+                              </td>
+                            </tr>
+                          )}
                         </>
                       )}
 
                       {/* Existing rows */}
-                      {visibleRows.map((row) => {
+                      {visibleRowsInTab.map((row) => {
                         const isEditing = editingRowId === row.id;
-                        const isManual = row.sheet_source === 'Manual_added' || row.sheet_source === 'Manual_edited' || row.sheet_source === 'Manual_verified';
-                        const rowClass = isEditing
-                          ? 'bg-blue-50 border-2 border-blue-400'
-                          : (isManual ? 'bg-green-50 hover:bg-green-100' : 'hover:bg-slate-50');
+                        const isManual = normalizeSheetSource(row.sheet_source).startsWith('manual');
+
+                        // Check duplicates
+                        const normSerial = (row.serial_number || '').trim().toLowerCase();
+                        const normTag = (row.tag_id || '').trim().toLowerCase();
+                        const isDupSerial = normSerial ? (serialCounts.get(normSerial) || 0) > 1 : false;
+                        const isDupTag = normTag ? (tagCounts.get(normTag) || 0) > 1 : false;
+                        const isDuplicateRow = isDupSerial || isDupTag;
+
+                        let rowClass = 'bg-white border-b border-slate-100 transition-colors';
+                        if (isEditing) {
+                          rowClass = 'bg-blue-50 border-2 border-blue-400';
+                        } else if (isDuplicateRow) {
+                          rowClass = 'bg-amber-50 border-l-4 border-l-amber-500';
+                        } else if (isManual) {
+                          rowClass = 'bg-green-50 hover:bg-green-100';
+                        } else {
+                          rowClass = 'hover:bg-slate-50';
+                        }
 
                         return (
                           <React.Fragment key={row.id}>
@@ -1653,7 +1684,8 @@ export default function NFOView() {
                                       type="text"
                                       value={draftRow?.serial_number || ''}
                                       onChange={(e) => updateDraftField('serial_number', e.target.value)}
-                                      className={`w-full h-7 px-1.5 py-0.5 border rounded text-xs font-mono focus:outline-none focus:ring-1 ${duplicateFields.serial ? 'border-red-500 bg-red-50 focus:ring-red-500' : 'border-slate-300 focus:ring-blue-500'}`}
+                                      className={`w-full h-7 px-1.5 py-0.5 border rounded text-xs font-mono focus:outline-none focus:ring-1 
+                                        ${duplicateFields.serial ? 'border-amber-500 bg-amber-50 focus:ring-amber-500' : 'border-slate-300 focus:ring-blue-500'}`}
                                       disabled={saving}
                                     />
                                     <div className="mt-1 flex items-center gap-1">
@@ -1692,7 +1724,8 @@ export default function NFOView() {
                                       type="text"
                                       value={draftRow?.tag_id || ''}
                                       onChange={(e) => updateDraftField('tag_id', e.target.value)}
-                                      className={`w-full h-7 px-1.5 py-0.5 border rounded text-xs font-mono focus:outline-none focus:ring-1 ${duplicateFields.tagId ? 'border-red-500 bg-red-50 focus:ring-red-500' : 'border-slate-300 focus:ring-blue-500'}`}
+                                      className={`w-full h-7 px-1.5 py-0.5 border rounded text-xs font-mono focus:outline-none focus:ring-1 
+                                        ${duplicateFields.tagId ? 'border-amber-500 bg-amber-50 focus:ring-amber-500' : 'border-slate-300 focus:ring-blue-500'}`}
                                       disabled={saving}
                                     />
                                     <div className="mt-1 flex items-center gap-1">
@@ -1766,6 +1799,11 @@ export default function NFOView() {
                                     </select>
                                   </td>
 
+                                  {/* Updated (Read Only) */}
+                                  <td className="px-2 py-1.5 text-xs text-slate-500 text-[10px]">
+                                    {row.updated_at ? new Date(row.updated_at).toLocaleString() : '-'}
+                                  </td>
+
                                   <td className="px-2 py-1.5 text-center text-xs space-x-2">
                                     <button
                                       onClick={saveInlineUpdate}
@@ -1822,6 +1860,11 @@ export default function NFOView() {
                                         </button>
                                       </div>
                                     )}
+                                    {isDupSerial && (
+                                      <div className="mt-1 text-[10px] text-amber-700 font-bold flex items-center">
+                                        ⚠ Duplicated ({serialCounts.get(normSerial)})
+                                      </div>
+                                    )}
                                   </td>
                                   <td className="px-2 py-1.5 text-xs font-mono text-slate-600">
                                     {row.tag_id}
@@ -1842,9 +1885,17 @@ export default function NFOView() {
                                         </button>
                                       </div>
                                     )}
+                                    {isDupTag && (
+                                      <div className="mt-1 text-[10px] text-amber-700 font-bold flex items-center">
+                                        ⚠ Duplicated ({tagCounts.get(normTag)})
+                                      </div>
+                                    )}
                                   </td>
                                   <td className="px-2 py-1.5 text-xs text-slate-800">{row.tag_category}</td>
                                   <td className="px-2 py-1.5 text-xs text-slate-800">{row.photo_category}</td>
+                                  <td className="px-2 py-1.5 text-xs text-slate-500 text-[10px]">
+                                    {row.updated_at ? new Date(row.updated_at).toLocaleString() : '-'}
+                                  </td>
                                   <td className="px-2 py-1.5 text-center text-xs">
                                     <button
                                       onClick={() => beginInlineEdit(row)}
@@ -1881,6 +1932,18 @@ export default function NFOView() {
                                 </td>
                               </tr>
                             )}
+                            {isEditing && editWarning && (
+                              <tr className="bg-amber-50 border-l-2 border-r-2 border-b-2 border-blue-400">
+                                <td colSpan={9} className="px-4 py-2">
+                                  <div className="flex items-center text-amber-700 text-xs">
+                                    <svg xmlns="http://www.w3.org/2000/svg" className="h-4 w-4 mr-2 flex-shrink-0" viewBox="0 0 20 20" fill="currentColor">
+                                      <path fillRule="evenodd" d="M8.257 3.099c.765-1.36 2.722-1.36 3.486 0l5.58 9.92c.75 1.334-.213 2.98-1.742 2.98H4.42c-1.53 0-2.493-1.646-1.743-2.98l5.58-9.92zM11 13a1 1 0 11-2 0 1 1 0 012 0zm-1-8a1 1 0 00-1 1v3a1 1 0 002 0V6a1 1 0 00-1-1z" clipRule="evenodd" />
+                                    </svg>
+                                    <span className="font-semibold mr-1">Warning:</span> {editWarning}
+                                  </div>
+                                </td>
+                              </tr>
+                            )}
                           </React.Fragment>
                         );
                       })}
@@ -1901,106 +1964,108 @@ export default function NFOView() {
       />
 
       {/* Add New Site Modal */}
-      {showAddSiteModal && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/50">
-          <div className="bg-white rounded-lg shadow-xl w-full max-w-lg overflow-hidden">
-            <div className="px-6 py-4 border-b border-slate-100 flex justify-between items-center">
-              <h3 className="text-lg font-semibold text-slate-800">Add New Site</h3>
-              <button
-                onClick={() => setShowAddSiteModal(false)}
-                className="text-slate-400 hover:text-slate-600"
-              >
-                ✕
-              </button>
-            </div>
+      {
+        showAddSiteModal && (
+          <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/50">
+            <div className="bg-white rounded-lg shadow-xl w-full max-w-lg overflow-hidden">
+              <div className="px-6 py-4 border-b border-slate-100 flex justify-between items-center">
+                <h3 className="text-lg font-semibold text-slate-800">Add New Site</h3>
+                <button
+                  onClick={() => setShowAddSiteModal(false)}
+                  className="text-slate-400 hover:text-slate-600"
+                >
+                  ✕
+                </button>
+              </div>
 
-            <div className="p-6">
-              {!addSiteSelected ? (
-                <>
-                  <p className="text-sm text-slate-600 mb-3">
-                    Search for an active site from the Front Office list.
-                  </p>
-                  <input
-                    type="text"
-                    value={addSiteQuery}
-                    onChange={(e) => setAddSiteQuery(e.target.value)}
-                    placeholder="Search site (e.g. 5074)..."
-                    className="w-full px-4 py-2 border border-slate-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500 mb-4"
-                    autoFocus
-                  />
+              <div className="p-6">
+                {!addSiteSelected ? (
+                  <>
+                    <p className="text-sm text-slate-600 mb-3">
+                      Search for an active site from the Front Office list.
+                    </p>
+                    <input
+                      type="text"
+                      value={addSiteQuery}
+                      onChange={(e) => setAddSiteQuery(e.target.value)}
+                      placeholder="Search site (e.g. 5074)..."
+                      className="w-full px-4 py-2 border border-slate-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500 mb-4"
+                      autoFocus
+                    />
 
-                  {addSiteLoading ? (
-                    <div className="text-center py-4 text-slate-500">Searching...</div>
-                  ) : (
-                    <div className="max-h-60 overflow-y-auto border border-slate-100 rounded-md">
-                      {addSiteSuggestions.map((site) => (
+                    {addSiteLoading ? (
+                      <div className="text-center py-4 text-slate-500">Searching...</div>
+                    ) : (
+                      <div className="max-h-60 overflow-y-auto border border-slate-100 rounded-md">
+                        {addSiteSuggestions.map((site) => (
+                          <button
+                            key={site.site_id_with_w}
+                            onClick={() => handleSelectAddSite(site)}
+                            className="w-full text-left px-4 py-3 hover:bg-blue-50 border-b border-slate-50 last:border-0"
+                          >
+                            <div className="font-medium text-slate-800">{site.site_id_with_w}</div>
+                            {site.site_id_without_w !== site.site_id_with_w && (
+                              <div className="text-xs text-slate-400">Alt: {site.site_id_without_w}</div>
+                            )}
+                          </button>
+                        ))}
+                        {addSiteQuery && addSiteSuggestions.length === 0 && (
+                          <div className="text-center py-4 text-slate-500">No active sites found.</div>
+                        )}
+                      </div>
+                    )}
+                  </>
+                ) : (
+                  <div className="text-center">
+                    <div className="mb-4">
+                      <div className="text-sm text-slate-500 mb-1">Selected Site</div>
+                      <div className="text-2xl font-bold text-slate-800">{addSiteSelected.canonical}</div>
+                    </div>
+
+                    {checkingInventory ? (
+                      <div className="py-4 text-slate-500">Checking inventory...</div>
+                    ) : (
+                      <div className="space-y-4">
+                        {addSiteInventoryCount !== null && addSiteInventoryCount > 0 ? (
+                          <div className="bg-amber-50 text-amber-800 p-4 rounded-md text-sm">
+                            This site already has {addSiteInventoryCount} inventory items.
+                            <button
+                              onClick={executeOpenExistingSite}
+                              className="block w-full mt-3 px-4 py-2 bg-blue-600 text-white rounded-md font-medium hover:bg-blue-700"
+                            >
+                              Open Site
+                            </button>
+                          </div>
+                        ) : (
+                          <div className="bg-green-50 text-green-800 p-4 rounded-md text-sm">
+                            No inventory found. You can add the first row.
+                            <button
+                              onClick={executeAddFirstRow}
+                              className="block w-full mt-3 px-4 py-2 bg-green-600 text-white rounded-md font-medium hover:bg-green-700"
+                            >
+                              Add First Row
+                            </button>
+                          </div>
+                        )}
+
                         <button
-                          key={site.site_id_with_w}
-                          onClick={() => handleSelectAddSite(site)}
-                          className="w-full text-left px-4 py-3 hover:bg-blue-50 border-b border-slate-50 last:border-0"
+                          onClick={() => {
+                            setAddSiteSelected(null);
+                            setAddSiteInventoryCount(null);
+                          }}
+                          className="text-sm text-slate-500 hover:text-slate-800 underline"
                         >
-                          <div className="font-medium text-slate-800">{site.site_id_with_w}</div>
-                          {site.site_id_without_w !== site.site_id_with_w && (
-                            <div className="text-xs text-slate-400">Alt: {site.site_id_without_w}</div>
-                          )}
+                          Back to Search
                         </button>
-                      ))}
-                      {addSiteQuery && addSiteSuggestions.length === 0 && (
-                        <div className="text-center py-4 text-slate-500">No active sites found.</div>
-                      )}
-                    </div>
-                  )}
-                </>
-              ) : (
-                <div className="text-center">
-                  <div className="mb-4">
-                    <div className="text-sm text-slate-500 mb-1">Selected Site</div>
-                    <div className="text-2xl font-bold text-slate-800">{addSiteSelected.canonical}</div>
+                      </div>
+                    )}
                   </div>
-
-                  {checkingInventory ? (
-                    <div className="py-4 text-slate-500">Checking inventory...</div>
-                  ) : (
-                    <div className="space-y-4">
-                      {addSiteInventoryCount !== null && addSiteInventoryCount > 0 ? (
-                        <div className="bg-amber-50 text-amber-800 p-4 rounded-md text-sm">
-                          This site already has {addSiteInventoryCount} inventory items.
-                          <button
-                            onClick={executeOpenExistingSite}
-                            className="block w-full mt-3 px-4 py-2 bg-blue-600 text-white rounded-md font-medium hover:bg-blue-700"
-                          >
-                            Open Site
-                          </button>
-                        </div>
-                      ) : (
-                        <div className="bg-green-50 text-green-800 p-4 rounded-md text-sm">
-                          No inventory found. You can add the first row.
-                          <button
-                            onClick={executeAddFirstRow}
-                            className="block w-full mt-3 px-4 py-2 bg-green-600 text-white rounded-md font-medium hover:bg-green-700"
-                          >
-                            Add First Row
-                          </button>
-                        </div>
-                      )}
-
-                      <button
-                        onClick={() => {
-                          setAddSiteSelected(null);
-                          setAddSiteInventoryCount(null);
-                        }}
-                        className="text-sm text-slate-500 hover:text-slate-800 underline"
-                      >
-                        Back to Search
-                      </button>
-                    </div>
-                  )}
-                </div>
-              )}
+                )}
+              </div>
             </div>
           </div>
-        </div>
-      )}
-    </main>
+        )
+      }
+    </main >
   );
 }
