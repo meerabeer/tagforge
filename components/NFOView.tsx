@@ -527,41 +527,100 @@ export default function NFOView() {
   }, [activeRequirement]);
 
   // Global Deduplication & Hidden Rows Calculation
-  // Global Duplicate Detection (Frequency counting)
-  const { visibleRowsInTab, serialCounts, tagCounts } = useMemo(() => {
-    const sCounts = new Map<string, number>();
-    const tCounts = new Map<string, number>();
+  // Global Duplicate Detection (Frequency counting + row info for hints)
+  interface DupInfo {
+    count: number;
+    rows: { id: string; sheet_source: string | null }[];
+  }
+  
+  const { visibleRowsInTab, serialDupMap, tagDupMap } = useMemo(() => {
+    // Maps: normalized key -> { count, rows[] }
+    const sMap = new Map<string, DupInfo>();
+    const tMap = new Map<string, DupInfo>();
 
-    // 1. Check frequencies across ALL rows for this site
+    // 1. Build duplicate info across ALL rows for this site
     allSiteRows.forEach(row => {
-      const site = (row.site_id || '').trim();
       const serial = (row.serial_number || '').trim().toLowerCase();
       const tag = (row.tag_id || '').trim().toLowerCase();
 
       if (serial) {
-        const key = `${site}|${serial}`;
-        sCounts.set(key, (sCounts.get(key) || 0) + 1);
+        const existing = sMap.get(serial) || { count: 0, rows: [] };
+        existing.count++;
+        existing.rows.push({ id: row.id, sheet_source: row.sheet_source });
+        sMap.set(serial, existing);
       }
       if (tag) {
-        const key = `${site}|${tag}`;
-        tCounts.set(key, (tCounts.get(key) || 0) + 1);
+        const existing = tMap.get(tag) || { count: 0, rows: [] };
+        existing.count++;
+        existing.rows.push({ id: row.id, sheet_source: row.sheet_source });
+        tMap.set(tag, existing);
       }
     });
 
-    // 2. Filter for current tab (Show ALL rows, including duplicates)
+    // 2. Filter for current tab
     const normActiveTab = normalizeCategoryName(activeTab);
-    const visible = allSiteRows.filter(row => {
-      // Category Filter
+    let visible = allSiteRows.filter(row => {
       if (activeTab !== 'All' && normalizeCategoryName(row.category) !== normActiveTab) return false;
       return true;
     });
 
+    // 3. Sort: duplicates first, then by updated_at desc within each group
+    visible = [...visible].sort((a, b) => {
+      const aSerial = (a.serial_number || '').trim().toLowerCase();
+      const aTag = (a.tag_id || '').trim().toLowerCase();
+      const bSerial = (b.serial_number || '').trim().toLowerCase();
+      const bTag = (b.tag_id || '').trim().toLowerCase();
+
+      const aIsDup = (aSerial && (sMap.get(aSerial)?.count || 0) > 1) || (aTag && (tMap.get(aTag)?.count || 0) > 1);
+      const bIsDup = (bSerial && (sMap.get(bSerial)?.count || 0) > 1) || (bTag && (tMap.get(bTag)?.count || 0) > 1);
+
+      // Duplicates come first
+      if (aIsDup && !bIsDup) return -1;
+      if (!aIsDup && bIsDup) return 1;
+
+      // Secondary sort: updated_at desc
+      const aTime = a.updated_at ? new Date(a.updated_at).getTime() : 0;
+      const bTime = b.updated_at ? new Date(b.updated_at).getTime() : 0;
+      return bTime - aTime;
+    });
+
     return {
       visibleRowsInTab: visible,
-      serialCounts: sCounts,
-      tagCounts: tCounts
+      serialDupMap: sMap,
+      tagDupMap: tMap
     };
   }, [activeTab, allSiteRows]);
+
+  // Helper to build "Also in" hint text
+  const buildDupHint = (dupInfo: DupInfo | undefined, currentRowId: string): string => {
+    if (!dupInfo || dupInfo.count <= 1) return '';
+    const others = dupInfo.rows.filter(r => r.id !== currentRowId);
+    if (others.length === 0) return '';
+    
+    const sources = others.map(r => r.sheet_source || 'Unknown').slice(0, 2);
+    const remaining = others.length - sources.length;
+    let hint = `Also in: ${sources.join(', ')}`;
+    if (remaining > 0) hint += ` +${remaining} more`;
+    return hint;
+  };
+
+  // Live duplicate check for edit mode (based on draftRow)
+  const getLiveDupInfo = (field: 'serial' | 'tag', value: string | null, currentRowId: string) => {
+    const normalized = (value || '').trim().toLowerCase();
+    if (!normalized) return { isDup: false, count: 0, hint: '' };
+    
+    const map = field === 'serial' ? serialDupMap : tagDupMap;
+    const info = map.get(normalized);
+    
+    if (!info) return { isDup: false, count: 0, hint: '' };
+    
+    // Check if this value appears in other rows (excluding current)
+    const othersCount = info.rows.filter(r => r.id !== currentRowId).length;
+    const isDup = othersCount > 0;
+    const hint = buildDupHint(info, currentRowId);
+    
+    return { isDup, count: info.count, hint };
+  };
 
   /*
   const { visibleRows, hiddenDuplicateCount } = useMemo(() => {
@@ -1406,105 +1465,143 @@ export default function NFOView() {
                             </td>
 
                             {/* Serial Number */}
-                            <td className="px-2 py-1.5 text-xs text-slate-800">
-                              <input
-                                type="text"
-                                value={draftRow.serial_number || ''}
-                                onChange={(e) => updateDraftField('serial_number', e.target.value)}
-                                className={`w-full h-7 px-1.5 py-0.5 border rounded text-xs font-mono focus:outline-none focus:ring-1 
-                                  ${duplicateFields.serial ? 'border-amber-500 bg-amber-50 focus:ring-amber-500' : 'border-slate-300 focus:ring-blue-500'}`}
-                                disabled={saving}
-                                placeholder="Optional"
-                              />
-                              <div className="mt-1 flex items-center gap-1">
-                                {draftRow?.serial_pic_url && (
-                                  <div className="flex gap-2 items-center">
-                                    <a
-                                      href="#"
-                                      onClick={(e) => { e.preventDefault(); openPreview(draftRow.serial_pic_url, 'Serial Photo'); }}
-                                      className="text-[10px] text-blue-600 underline"
-                                    >
-                                      View
-                                    </a>
-                                    <button
-                                      onClick={() => handleDeleteImage(draftRow.id, 'serial')}
-                                      className="text-[10px] text-red-500 hover:text-red-700 font-medium"
-                                      title="Delete Photo"
-                                    >
-                                      Delete
-                                    </button>
-                                  </div>
-                                )}
-                                <label className="cursor-pointer inline-flex items-center px-1.5 py-0.5 bg-slate-200 hover:bg-slate-300 rounded text-[10px] text-slate-700">
-                                  {uploadingField?.rowId === draftRow?.id && uploadingField?.field === 'serial' ? (
-                                    <span>{uploadProgress || '...'}</span>
-                                  ) : (
-                                    <>
-                                      <span>Upload</span>
-                                      <input
-                                        type="file"
-                                        className="hidden"
-                                        accept="image/*"
-                                        onChange={(e) => {
-                                          const f = e.target.files?.[0];
-                                          if (f && draftRow) handleFileUpload(f, draftRow.id, 'serial');
-                                        }}
-                                      />
-                                    </>
-                                  )}
-                                </label>
-                              </div>
+                            <td className="px-2 py-1.5 text-xs text-slate-800 min-w-[120px] max-w-[160px]">
+                              {(() => {
+                                const liveDup = getLiveDupInfo('serial', draftRow.serial_number, draftRow.id);
+                                return (
+                                  <>
+                                    <input
+                                      type="text"
+                                      value={draftRow.serial_number || ''}
+                                      onChange={(e) => updateDraftField('serial_number', e.target.value)}
+                                      className={`w-full h-7 px-1.5 py-0.5 border rounded text-xs font-mono focus:outline-none focus:ring-1 
+                                        ${liveDup.isDup || duplicateFields.serial ? 'border-amber-500 bg-amber-50 focus:ring-amber-500' : 'border-slate-300 focus:ring-blue-500'}`}
+                                      disabled={saving}
+                                      placeholder="Optional"
+                                    />
+                                    {liveDup.isDup && (
+                                      <div className="mt-0.5">
+                                        <span className="px-1 py-0.5 bg-amber-200 text-amber-800 text-[8px] font-bold rounded">
+                                          DUP x{liveDup.count}
+                                        </span>
+                                      </div>
+                                    )}
+                                    {liveDup.hint && (
+                                      <div className="text-[8px] text-amber-600 italic truncate" title={liveDup.hint}>
+                                        {liveDup.hint}
+                                      </div>
+                                    )}
+                                    <div className="mt-1 flex items-center gap-1">
+                                      {draftRow?.serial_pic_url && (
+                                        <div className="flex gap-2 items-center">
+                                          <a
+                                            href="#"
+                                            onClick={(e) => { e.preventDefault(); openPreview(draftRow.serial_pic_url, 'Serial Photo'); }}
+                                            className="text-[10px] text-blue-600 underline"
+                                          >
+                                            View
+                                          </a>
+                                          <button
+                                            onClick={() => handleDeleteImage(draftRow.id, 'serial')}
+                                            className="text-[10px] text-red-500 hover:text-red-700 font-medium"
+                                            title="Delete Photo"
+                                          >
+                                            Delete
+                                          </button>
+                                        </div>
+                                      )}
+                                      <label className="cursor-pointer inline-flex items-center px-1.5 py-0.5 bg-slate-200 hover:bg-slate-300 rounded text-[10px] text-slate-700">
+                                        {uploadingField?.rowId === draftRow?.id && uploadingField?.field === 'serial' ? (
+                                          <span>{uploadProgress || '...'}</span>
+                                        ) : (
+                                          <>
+                                            <span>Upload</span>
+                                            <input
+                                              type="file"
+                                              className="hidden"
+                                              accept="image/*"
+                                              onChange={(e) => {
+                                                const f = e.target.files?.[0];
+                                                if (f && draftRow) handleFileUpload(f, draftRow.id, 'serial');
+                                              }}
+                                            />
+                                          </>
+                                        )}
+                                      </label>
+                                    </div>
+                                  </>
+                                );
+                              })()}
                             </td>
 
                             {/* Tag ID */}
-                            <td className="px-2 py-1.5 text-xs text-slate-800">
-                              <input
-                                type="text"
-                                value={draftRow.tag_id || ''}
-                                onChange={(e) => updateDraftField('tag_id', e.target.value)}
-                                className={`w-full h-7 px-1.5 py-0.5 border rounded text-xs font-mono focus:outline-none focus:ring-1 
-                                  ${duplicateFields.tagId ? 'border-amber-500 bg-amber-50 focus:ring-amber-500' : 'border-slate-300 focus:ring-blue-500'}`}
-                                disabled={saving}
-                                placeholder="Optional"
-                              />
-                              <div className="mt-1 flex items-center gap-1">
-                                {draftRow?.tag_pic_url && (
-                                  <div className="flex gap-2 items-center">
-                                    <a
-                                      href="#"
-                                      onClick={(e) => { e.preventDefault(); openPreview(draftRow.tag_pic_url, 'Tag Photo'); }}
-                                      className="text-[10px] text-blue-600 underline"
-                                    >
-                                      View
-                                    </a>
-                                    <button
-                                      onClick={() => handleDeleteImage(draftRow.id, 'tag')}
-                                      className="text-[10px] text-red-500 hover:text-red-700 font-medium"
-                                      title="Delete Photo"
-                                    >
-                                      Delete
-                                    </button>
-                                  </div>
-                                )}
-                                <label className="cursor-pointer inline-flex items-center px-1.5 py-0.5 bg-slate-200 hover:bg-slate-300 rounded text-[10px] text-slate-700">
-                                  {uploadingField?.rowId === draftRow?.id && uploadingField?.field === 'tag' ? (
-                                    <span>{uploadProgress || '...'}</span>
-                                  ) : (
-                                    <>
-                                      <span>Upload</span>
-                                      <input
-                                        type="file"
-                                        className="hidden"
-                                        accept="image/*"
-                                        onChange={(e) => {
-                                          const f = e.target.files?.[0];
-                                          if (f && draftRow) handleFileUpload(f, draftRow.id, 'tag');
-                                        }}
-                                      />
-                                    </>
-                                  )}
-                                </label>
-                              </div>
+                            <td className="px-2 py-1.5 text-xs text-slate-800 min-w-[100px] max-w-[140px]">
+                              {(() => {
+                                const liveDup = getLiveDupInfo('tag', draftRow.tag_id, draftRow.id);
+                                return (
+                                  <>
+                                    <input
+                                      type="text"
+                                      value={draftRow.tag_id || ''}
+                                      onChange={(e) => updateDraftField('tag_id', e.target.value)}
+                                      className={`w-full h-7 px-1.5 py-0.5 border rounded text-xs font-mono focus:outline-none focus:ring-1 
+                                        ${liveDup.isDup || duplicateFields.tagId ? 'border-amber-500 bg-amber-50 focus:ring-amber-500' : 'border-slate-300 focus:ring-blue-500'}`}
+                                      disabled={saving}
+                                      placeholder="Optional"
+                                    />
+                                    {liveDup.isDup && (
+                                      <div className="mt-0.5">
+                                        <span className="px-1 py-0.5 bg-amber-200 text-amber-800 text-[8px] font-bold rounded">
+                                          DUP x{liveDup.count}
+                                        </span>
+                                      </div>
+                                    )}
+                                    {liveDup.hint && (
+                                      <div className="text-[8px] text-amber-600 italic truncate" title={liveDup.hint}>
+                                        {liveDup.hint}
+                                      </div>
+                                    )}
+                                    <div className="mt-1 flex items-center gap-1">
+                                      {draftRow?.tag_pic_url && (
+                                        <div className="flex gap-2 items-center">
+                                          <a
+                                            href="#"
+                                            onClick={(e) => { e.preventDefault(); openPreview(draftRow.tag_pic_url, 'Tag Photo'); }}
+                                            className="text-[10px] text-blue-600 underline"
+                                          >
+                                            View
+                                          </a>
+                                          <button
+                                            onClick={() => handleDeleteImage(draftRow.id, 'tag')}
+                                            className="text-[10px] text-red-500 hover:text-red-700 font-medium"
+                                            title="Delete Photo"
+                                          >
+                                            Delete
+                                          </button>
+                                        </div>
+                                      )}
+                                      <label className="cursor-pointer inline-flex items-center px-1.5 py-0.5 bg-slate-200 hover:bg-slate-300 rounded text-[10px] text-slate-700">
+                                        {uploadingField?.rowId === draftRow?.id && uploadingField?.field === 'tag' ? (
+                                          <span>{uploadProgress || '...'}</span>
+                                        ) : (
+                                          <>
+                                            <span>Upload</span>
+                                            <input
+                                              type="file"
+                                              className="hidden"
+                                              accept="image/*"
+                                              onChange={(e) => {
+                                                const f = e.target.files?.[0];
+                                                if (f && draftRow) handleFileUpload(f, draftRow.id, 'tag');
+                                              }}
+                                            />
+                                          </>
+                                        )}
+                                      </label>
+                                    </div>
+                                  </>
+                                );
+                              })()}
                             </td>
 
                             {/* Tag Category */}
@@ -1599,12 +1696,18 @@ export default function NFOView() {
                         const isEditing = editingRowId === row.id;
                         const isManual = normalizeSheetSource(row.sheet_source).startsWith('manual');
 
-                        // Check duplicates
+                        // Check duplicates using new maps
                         const normSerial = (row.serial_number || '').trim().toLowerCase();
                         const normTag = (row.tag_id || '').trim().toLowerCase();
-                        const isDupSerial = normSerial ? (serialCounts.get(normSerial) || 0) > 1 : false;
-                        const isDupTag = normTag ? (tagCounts.get(normTag) || 0) > 1 : false;
+                        const serialInfo = normSerial ? serialDupMap.get(normSerial) : undefined;
+                        const tagInfo = normTag ? tagDupMap.get(normTag) : undefined;
+                        const isDupSerial = serialInfo && serialInfo.count > 1;
+                        const isDupTag = tagInfo && tagInfo.count > 1;
                         const isDuplicateRow = isDupSerial || isDupTag;
+                        
+                        // Build hints for view mode
+                        const serialHint = buildDupHint(serialInfo, row.id);
+                        const tagHint = buildDupHint(tagInfo, row.id);
 
                         let rowClass = 'bg-white border-b border-slate-100 transition-colors';
                         if (isEditing) {
@@ -1679,84 +1782,122 @@ export default function NFOView() {
                                     </select>
                                   </td>
 
-                                  <td className="px-2 py-1.5 text-xs text-slate-800">
-                                    <input
-                                      type="text"
-                                      value={draftRow?.serial_number || ''}
-                                      onChange={(e) => updateDraftField('serial_number', e.target.value)}
-                                      className={`w-full h-7 px-1.5 py-0.5 border rounded text-xs font-mono focus:outline-none focus:ring-1 
-                                        ${duplicateFields.serial ? 'border-amber-500 bg-amber-50 focus:ring-amber-500' : 'border-slate-300 focus:ring-blue-500'}`}
-                                      disabled={saving}
-                                    />
-                                    <div className="mt-1 flex items-center gap-1">
-                                      {draftRow?.serial_pic_url && (
-                                        <a
-                                          href="#"
-                                          onClick={(e) => { e.preventDefault(); openPreview(draftRow.serial_pic_url, 'Serial Photo'); }}
-                                          className="text-[10px] text-blue-600 underline"
-                                        >
-                                          View
-                                        </a>
-                                      )}
-                                      <label className="cursor-pointer inline-flex items-center px-1.5 py-0.5 bg-slate-200 hover:bg-slate-300 rounded text-[10px] text-slate-700">
-                                        {uploadingField?.rowId === draftRow?.id && uploadingField?.field === 'serial' ? (
-                                          <span>{uploadProgress || '...'}</span>
-                                        ) : (
-                                          <>
-                                            <span>Upload</span>
-                                            <input
-                                              type="file"
-                                              className="hidden"
-                                              accept="image/*"
-                                              onChange={(e) => {
-                                                const f = e.target.files?.[0];
-                                                if (f && draftRow) handleFileUpload(f, draftRow.id, 'serial');
-                                              }}
-                                            />
-                                          </>
-                                        )}
-                                      </label>
-                                    </div>
+                                  <td className="px-2 py-1.5 text-xs text-slate-800 min-w-[120px] max-w-[160px]">
+                                    {(() => {
+                                      const liveDup = getLiveDupInfo('serial', draftRow?.serial_number || null, draftRow?.id || '');
+                                      return (
+                                        <>
+                                          <input
+                                            type="text"
+                                            value={draftRow?.serial_number || ''}
+                                            onChange={(e) => updateDraftField('serial_number', e.target.value)}
+                                            className={`w-full h-7 px-1.5 py-0.5 border rounded text-xs font-mono focus:outline-none focus:ring-1 
+                                              ${liveDup.isDup || duplicateFields.serial ? 'border-amber-500 bg-amber-50 focus:ring-amber-500' : 'border-slate-300 focus:ring-blue-500'}`}
+                                            disabled={saving}
+                                          />
+                                          {liveDup.isDup && (
+                                            <div className="mt-0.5">
+                                              <span className="px-1 py-0.5 bg-amber-200 text-amber-800 text-[8px] font-bold rounded">
+                                                DUP x{liveDup.count}
+                                              </span>
+                                            </div>
+                                          )}
+                                          {liveDup.hint && (
+                                            <div className="text-[8px] text-amber-600 italic truncate" title={liveDup.hint}>
+                                              {liveDup.hint}
+                                            </div>
+                                          )}
+                                          <div className="mt-1 flex items-center gap-1">
+                                            {draftRow?.serial_pic_url && (
+                                              <a
+                                                href="#"
+                                                onClick={(e) => { e.preventDefault(); openPreview(draftRow.serial_pic_url, 'Serial Photo'); }}
+                                                className="text-[10px] text-blue-600 underline"
+                                              >
+                                                View
+                                              </a>
+                                            )}
+                                            <label className="cursor-pointer inline-flex items-center px-1.5 py-0.5 bg-slate-200 hover:bg-slate-300 rounded text-[10px] text-slate-700">
+                                              {uploadingField?.rowId === draftRow?.id && uploadingField?.field === 'serial' ? (
+                                                <span>{uploadProgress || '...'}</span>
+                                              ) : (
+                                                <>
+                                                  <span>Upload</span>
+                                                  <input
+                                                    type="file"
+                                                    className="hidden"
+                                                    accept="image/*"
+                                                    onChange={(e) => {
+                                                      const f = e.target.files?.[0];
+                                                      if (f && draftRow) handleFileUpload(f, draftRow.id, 'serial');
+                                                    }}
+                                                  />
+                                                </>
+                                              )}
+                                            </label>
+                                          </div>
+                                        </>
+                                      );
+                                    })()}
                                   </td>
 
-                                  <td className="px-2 py-1.5 text-xs text-slate-800">
-                                    <input
-                                      type="text"
-                                      value={draftRow?.tag_id || ''}
-                                      onChange={(e) => updateDraftField('tag_id', e.target.value)}
-                                      className={`w-full h-7 px-1.5 py-0.5 border rounded text-xs font-mono focus:outline-none focus:ring-1 
-                                        ${duplicateFields.tagId ? 'border-amber-500 bg-amber-50 focus:ring-amber-500' : 'border-slate-300 focus:ring-blue-500'}`}
-                                      disabled={saving}
-                                    />
-                                    <div className="mt-1 flex items-center gap-1">
-                                      {draftRow?.tag_pic_url && (
-                                        <a
-                                          href="#"
-                                          onClick={(e) => { e.preventDefault(); openPreview(draftRow.tag_pic_url, 'Tag Photo'); }}
-                                          className="text-[10px] text-blue-600 underline"
-                                        >
-                                          View
-                                        </a>
-                                      )}
-                                      <label className="cursor-pointer inline-flex items-center px-1.5 py-0.5 bg-slate-200 hover:bg-slate-300 rounded text-[10px] text-slate-700">
-                                        {uploadingField?.rowId === draftRow?.id && uploadingField?.field === 'tag' ? (
-                                          <span>{uploadProgress || '...'}</span>
-                                        ) : (
-                                          <>
-                                            <span>Upload</span>
-                                            <input
-                                              type="file"
-                                              className="hidden"
-                                              accept="image/*"
-                                              onChange={(e) => {
-                                                const f = e.target.files?.[0];
-                                                if (f && draftRow) handleFileUpload(f, draftRow.id, 'tag');
-                                              }}
-                                            />
-                                          </>
-                                        )}
-                                      </label>
-                                    </div>
+                                  <td className="px-2 py-1.5 text-xs text-slate-800 min-w-[100px] max-w-[140px]">
+                                    {(() => {
+                                      const liveDup = getLiveDupInfo('tag', draftRow?.tag_id || null, draftRow?.id || '');
+                                      return (
+                                        <>
+                                          <input
+                                            type="text"
+                                            value={draftRow?.tag_id || ''}
+                                            onChange={(e) => updateDraftField('tag_id', e.target.value)}
+                                            className={`w-full h-7 px-1.5 py-0.5 border rounded text-xs font-mono focus:outline-none focus:ring-1 
+                                              ${liveDup.isDup || duplicateFields.tagId ? 'border-amber-500 bg-amber-50 focus:ring-amber-500' : 'border-slate-300 focus:ring-blue-500'}`}
+                                            disabled={saving}
+                                          />
+                                          {liveDup.isDup && (
+                                            <div className="mt-0.5">
+                                              <span className="px-1 py-0.5 bg-amber-200 text-amber-800 text-[8px] font-bold rounded">
+                                                DUP x{liveDup.count}
+                                              </span>
+                                            </div>
+                                          )}
+                                          {liveDup.hint && (
+                                            <div className="text-[8px] text-amber-600 italic truncate" title={liveDup.hint}>
+                                              {liveDup.hint}
+                                            </div>
+                                          )}
+                                          <div className="mt-1 flex items-center gap-1">
+                                            {draftRow?.tag_pic_url && (
+                                              <a
+                                                href="#"
+                                                onClick={(e) => { e.preventDefault(); openPreview(draftRow.tag_pic_url, 'Tag Photo'); }}
+                                                className="text-[10px] text-blue-600 underline"
+                                              >
+                                                View
+                                              </a>
+                                            )}
+                                            <label className="cursor-pointer inline-flex items-center px-1.5 py-0.5 bg-slate-200 hover:bg-slate-300 rounded text-[10px] text-slate-700">
+                                              {uploadingField?.rowId === draftRow?.id && uploadingField?.field === 'tag' ? (
+                                                <span>{uploadProgress || '...'}</span>
+                                              ) : (
+                                                <>
+                                                  <span>Upload</span>
+                                                  <input
+                                                    type="file"
+                                                    className="hidden"
+                                                    accept="image/*"
+                                                    onChange={(e) => {
+                                                      const f = e.target.files?.[0];
+                                                      if (f && draftRow) handleFileUpload(f, draftRow.id, 'tag');
+                                                    }}
+                                                  />
+                                                </>
+                                              )}
+                                            </label>
+                                          </div>
+                                        </>
+                                      );
+                                    })()}
                                   </td>
 
                                   <td className="px-2 py-1.5 text-xs text-slate-800">
@@ -1841,53 +1982,63 @@ export default function NFOView() {
                                   <td className="px-2 py-1.5 text-xs text-slate-800">{row.equipment_type}</td>
                                   <td className="px-2 py-1.5 text-xs text-slate-800">{row.product_name}</td>
                                   <td className="px-2 py-1.5 text-xs font-mono text-slate-600">{row.product_number}</td>
-                                  <td className="px-2 py-1.5 text-xs font-mono text-blue-700 font-medium">
-                                    {row.serial_number}
+                                  <td className={`px-2 py-1.5 text-xs font-mono min-w-[100px] max-w-[140px] ${isDupSerial ? 'bg-amber-50' : ''}`}>
+                                    <div className="truncate text-blue-700 font-medium" title={row.serial_number || ''}>{row.serial_number}</div>
+                                    {isDupSerial && (
+                                      <span className="inline-block mt-0.5 px-1 py-0.5 bg-amber-200 text-amber-800 text-[8px] font-bold rounded">
+                                        DUP x{serialInfo?.count}
+                                      </span>
+                                    )}
                                     {row.serial_pic_url && (
-                                      <div className="ml-2 inline-flex gap-1 items-center">
+                                      <div className="mt-0.5 flex gap-1 items-center">
                                         <button
                                           onClick={() => openPreview(row.serial_pic_url, 'Serial Photo')}
-                                          className="text-[10px] text-blue-500 underline hover:text-blue-700"
+                                          className="text-[9px] text-blue-500 underline hover:text-blue-700"
                                         >
                                           View
                                         </button>
                                         <button
                                           onClick={() => handleDeleteImage(row.id, 'serial')}
-                                          className="text-[10px] text-red-400 hover:text-red-600 font-bold px-1"
+                                          className="text-[9px] text-red-400 hover:text-red-600 font-bold"
                                           title="Delete Photo"
                                         >
                                           ✕
                                         </button>
                                       </div>
                                     )}
-                                    {isDupSerial && (
-                                      <div className="mt-1 text-[10px] text-amber-700 font-bold flex items-center">
-                                        ⚠ Duplicated ({serialCounts.get(normSerial)})
+                                    {serialHint && (
+                                      <div className="text-[8px] text-amber-600 italic truncate" title={serialHint}>
+                                        {serialHint}
                                       </div>
                                     )}
                                   </td>
-                                  <td className="px-2 py-1.5 text-xs font-mono text-slate-600">
-                                    {row.tag_id}
+                                  <td className={`px-2 py-1.5 text-xs font-mono min-w-[80px] max-w-[120px] ${isDupTag ? 'bg-amber-50' : ''}`}>
+                                    <div className="truncate text-slate-600" title={row.tag_id || ''}>{row.tag_id}</div>
+                                    {isDupTag && (
+                                      <span className="inline-block mt-0.5 px-1 py-0.5 bg-amber-200 text-amber-800 text-[8px] font-bold rounded">
+                                        DUP x{tagInfo?.count}
+                                      </span>
+                                    )}
                                     {row.tag_pic_url && (
-                                      <div className="ml-2 inline-flex gap-1 items-center">
+                                      <div className="mt-0.5 flex gap-1 items-center">
                                         <button
                                           onClick={() => openPreview(row.tag_pic_url, 'Tag Photo')}
-                                          className="text-[10px] text-blue-500 underline hover:text-blue-700"
+                                          className="text-[9px] text-blue-500 underline hover:text-blue-700"
                                         >
                                           View
                                         </button>
                                         <button
                                           onClick={() => handleDeleteImage(row.id, 'tag')}
-                                          className="text-[10px] text-red-400 hover:text-red-600 font-bold px-1"
+                                          className="text-[9px] text-red-400 hover:text-red-600 font-bold"
                                           title="Delete Photo"
                                         >
                                           ✕
                                         </button>
                                       </div>
                                     )}
-                                    {isDupTag && (
-                                      <div className="mt-1 text-[10px] text-amber-700 font-bold flex items-center">
-                                        ⚠ Duplicated ({tagCounts.get(normTag)})
+                                    {tagHint && (
+                                      <div className="text-[8px] text-amber-600 italic truncate" title={tagHint}>
+                                        {tagHint}
                                       </div>
                                     )}
                                   </td>
