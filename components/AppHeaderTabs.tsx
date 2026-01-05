@@ -11,9 +11,10 @@ export default function AppHeaderTabs() {
     const { profile, loading } = useAuth();
 
     // Determine active tab based on path prefix
+    const isSuggestions = pathname?.startsWith('/suggestions');
     const isAnalyst = pathname?.startsWith('/analyst');
     const isPMR = pathname?.startsWith('/pmr');
-    const isNFO = !isAnalyst && !isPMR;
+    const isNFO = !isAnalyst && !isPMR && !isSuggestions;
 
     // Preserve 'site' parameter when switching tabs
     const siteParam = searchParams.get('site');
@@ -63,6 +64,15 @@ export default function AppHeaderTabs() {
                                 }`}
                         >
                             Plans
+                        </Link>
+                        <Link
+                            href="/suggestions"
+                            className={`px-4 py-2 text-sm font-medium rounded-md transition-colors ${isSuggestions
+                                ? 'bg-white text-blue-700 shadow-sm'
+                                : 'text-slate-600 hover:text-slate-900 hover:bg-slate-200'
+                                }`}
+                        >
+                            Suggestions
                         </Link>
                     </nav>
                 </div>

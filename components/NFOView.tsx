@@ -135,9 +135,11 @@ export default function NFOView() {
     categoryEquipmentProductToNumbers: new Map()
   });
   const [tagCategoryOptions, setTagCategoryOptions] = useState<string[]>([]);
+  const [tagCategoryIdMap, setTagCategoryIdMap] = useState<Map<string, number>>(new Map());
   const [tagCategoryLoading, setTagCategoryLoading] = useState(true);
   const [tagCategoryError, setTagCategoryError] = useState(false);
   const [photoCategoryOptions, setPhotoCategoryOptions] = useState<string[]>([]);
+  const [photoCategoryIdMap, setPhotoCategoryIdMap] = useState<Map<string, number>>(new Map());
 
   // Upload State
   const [uploadingField, setUploadingField] = useState<{ rowId: string; field: 'serial' | 'tag' } | null>(null);
@@ -240,13 +242,15 @@ export default function NFOView() {
       try {
         const { data, error: fetchError } = await supabase
           .from('tag_category_helper')
-          .select('value, sort_order')
+          .select('id, value, sort_order')
           .order('sort_order', { ascending: true });
 
         if (fetchError) throw fetchError;
 
-        const values = (data || []).map((item: { value: string; sort_order: number }) => item.value);
+        const values = (data || []).map((item: { id: number; value: string; sort_order: number }) => item.value);
+        const idMap = new Map<string, number>((data || []).map((item: { id: number; value: string }) => [item.value, item.id]));
         setTagCategoryOptions(values);
+        setTagCategoryIdMap(idMap);
       } catch (err) {
         console.error('Failed to load tag categories:', err);
         setTagCategoryError(true);
@@ -263,11 +267,12 @@ export default function NFOView() {
       try {
         const { data, error } = await supabase
           .from('photo_category_helper')
-          .select('value, sort_order')
+          .select('id, value, sort_order')
           .order('sort_order', { ascending: true });
 
         if (error) throw error;
-        setPhotoCategoryOptions((data || []).map((i: any) => i.value));
+        setPhotoCategoryOptions((data || []).map((i: { id: number; value: string }) => i.value));
+        setPhotoCategoryIdMap(new Map<string, number>((data || []).map((i: { id: number; value: string }) => [i.value, i.id])));
       } catch (err) {
         console.error('Failed to load photo categories:', err);
       }
@@ -944,6 +949,10 @@ export default function NFOView() {
 
     try {
       if (isAddingNew) {
+        // Resolve category IDs from text (null if not found in map)
+        const resolvedTagCategoryId = draftRow.tag_category ? tagCategoryIdMap.get(draftRow.tag_category) ?? null : null;
+        const resolvedPhotoCategoryId = draftRow.photo_category ? photoCategoryIdMap.get(draftRow.photo_category) ?? null : null;
+
         // INSERT new row
         const { data, error: insertError } = await supabase
           .from('main_inventory')
@@ -957,7 +966,9 @@ export default function NFOView() {
             serial_number: draftRow.serial_number,
             tag_id: draftRow.tag_id,
             tag_category: draftRow.tag_category,
+            tag_category_id: resolvedTagCategoryId,
             photo_category: draftRow.photo_category,
+            photo_category_id: resolvedPhotoCategoryId,
             serial_pic_url: draftRow.serial_pic_url,
             tag_pic_url: draftRow.tag_pic_url
           })
@@ -977,6 +988,10 @@ export default function NFOView() {
           nextSheetSource = 'Manual_verified';
         }
 
+        // Resolve category IDs from text (null if not found in map)
+        const resolvedTagCategoryId = draftRow.tag_category ? tagCategoryIdMap.get(draftRow.tag_category) ?? null : null;
+        const resolvedPhotoCategoryId = draftRow.photo_category ? photoCategoryIdMap.get(draftRow.photo_category) ?? null : null;
+
         // UPDATE existing row
         await updateMainInventoryRow(draftRow.id, {
           sheet_source: nextSheetSource,
@@ -987,7 +1002,9 @@ export default function NFOView() {
           serial_number: draftRow.serial_number,
           tag_id: draftRow.tag_id,
           tag_category: draftRow.tag_category,
+          tag_category_id: resolvedTagCategoryId,
           photo_category: draftRow.photo_category,
+          photo_category_id: resolvedPhotoCategoryId,
           serial_pic_url: draftRow.serial_pic_url,
           tag_pic_url: draftRow.tag_pic_url
         });

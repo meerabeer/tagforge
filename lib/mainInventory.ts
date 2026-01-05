@@ -9,9 +9,11 @@ export type MainInventoryUpdatePatch = {
   serial_number?: string | null;
   tag_id?: string | null;
   tag_category?: string | null;
+  tag_category_id?: number | null;
   serial_pic_url?: string | null;
   tag_pic_url?: string | null;
   photo_category?: string | null;
+  photo_category_id?: number | null;
 };
 
 export async function updateMainInventoryRow(id: string, patch: MainInventoryUpdatePatch): Promise<void> {
