@@ -1,19 +1,28 @@
 'use client';
 
 import React, { useState, useEffect, useCallback } from 'react';
+import { useRouter, useSearchParams, usePathname } from 'next/navigation';
 import { supabase } from '@/lib/supabaseClient';
+import { getParam, setParams } from '@/lib/urlUtils';
 
 // --- Types ---
 interface PMRPlan {
     Site_ID_1: string; // W2470
     Site_ID: string;   // 2470
     Planned_PMR_Date: string; // "YYYY-MM-DD"
+    FME_Name: string | null;
+    Site_Type: string | null;
 }
 
-interface InventorySubmission {
+interface InventoryRow {
     site_id: string;
-    sheet_source: string;
-    updated_at: string;
+    sheet_source: string | null;
+    updated_at: string | null;
+    serial_number: string | null;
+    tag_id: string | null;
+    tag_pic_url: string | null;
+    tag_category: string | null;
+    photo_category: string | null;
 }
 
 interface PMRRow {
@@ -23,14 +32,43 @@ interface PMRRow {
     submission_count: number;
     total_rows: number;
     last_submission_date: string | null;
+    fme_name: string | null;
+    site_type: string | null;
+    // Data quality metrics
+    duplicate_serials: number;
+    duplicate_tags: number;
+    // Tag pictures metrics
+    tag_pics_available: number;
+    tag_pics_required: number;
 }
 
 // --- Component ---
 export default function PMRView() {
-    const [selectedDate, setSelectedDate] = useState<string>(new Date().toISOString().split('T')[0]);
+    const router = useRouter();
+    const searchParams = useSearchParams();
+    const pathname = usePathname();
+
+    // --- URL State Initialization ---
+    const initialDate = getParam(searchParams, 'date', new Date().toISOString().split('T')[0]);
+
+    const [selectedDate, setSelectedDateState] = useState<string>(initialDate);
     const [loading, setLoading] = useState(false);
     const [rows, setRows] = useState<PMRRow[]>([]);
     const [stats, setStats] = useState({ total: 0, submitted: 0, percentage: 0 });
+
+    // --- URL Update Helper ---
+    const setSelectedDate = (value: string) => {
+        setSelectedDateState(value);
+        setParams(router, pathname, searchParams, { date: value });
+    };
+
+    // Sync URL changes to state (handles browser back/forward)
+    useEffect(() => {
+        const urlDate = getParam(searchParams, 'date', new Date().toISOString().split('T')[0]);
+        if (urlDate !== selectedDate) {
+            setSelectedDateState(urlDate);
+        }
+    }, [searchParams]);
 
     const fetchData = useCallback(async () => {
         if (!selectedDate) return;
@@ -42,7 +80,7 @@ export default function PMRView() {
             // Assuming Planned_Date exists. If not, this query will fail.
             const { data: plansData, error: plansError } = await supabase
                 .from('pmr_plan_2026_sheet1')
-                .select('Site_ID, Site_ID_1, Planned_PMR_Date')
+                .select('Site_ID, Site_ID_1, Planned_PMR_Date, FME_Name, Site_Type')
                 .eq('Planned_PMR_Date', selectedDate);
 
             if (plansError) {
@@ -73,21 +111,38 @@ export default function PMRView() {
 
             const { data: subsData, error: subsError } = await supabase
                 .from('main_inventory')
-                .select('site_id, sheet_source, updated_at')
+                .select('site_id, sheet_source, updated_at, serial_number, tag_id, tag_pic_url, tag_category, photo_category')
                 .in('site_id', Array.from(allSiteIds));
 
             if (subsError) throw subsError;
 
-            const submissions = (subsData as InventorySubmission[]) || [];
+            const submissions = (subsData as InventoryRow[]) || [];
 
             // Map submissions by site_id for easy lookup
-            const submissionsMap = new Map<string, InventorySubmission[]>();
+            const submissionsMap = new Map<string, InventoryRow[]>();
             submissions.forEach(s => {
                 if (!submissionsMap.has(s.site_id)) {
                     submissionsMap.set(s.site_id, []);
                 }
                 submissionsMap.get(s.site_id)!.push(s);
             });
+
+            // Helper function to count how many values appear more than once
+            const countDuplicateValues = (values: (string | null)[]): number => {
+                const nonNullValues = values.filter(v => v && v.trim() !== '');
+                const countMap = new Map<string, number>();
+                nonNullValues.forEach(v => {
+                    countMap.set(v!, (countMap.get(v!) || 0) + 1);
+                });
+                // Count how many values appear more than once
+                let duplicateValueCount = 0;
+                countMap.forEach((count) => {
+                    if (count > 1) {
+                        duplicateValueCount += count; // Count all instances of duplicates
+                    }
+                });
+                return duplicateValueCount;
+            };
 
             // Build rows
             const results: PMRRow[] = plans.map(p => {
@@ -105,6 +160,25 @@ export default function PMRView() {
                 );
                 const isSubmitted = manualRows.length > 0;
 
+                // Calculate duplicates across ALL site rows (not just manual)
+                // This shows if data is duplicated between original and manual entries
+                const allSerials = siteRows.map(r => r.serial_number);
+                const allTags = siteRows.map(r => r.tag_id);
+                const duplicateSerials = countDuplicateValues(allSerials);
+                const duplicateTags = countDuplicateValues(allTags);
+
+                // Calculate tag pictures metrics
+                // Only count rows where tag_category AND photo_category are NOT "Item dismantled"
+                const rowsRequiringTagPic = manualRows.filter(r => {
+                    const tagCat = (r.tag_category || '').toLowerCase();
+                    const photoCat = (r.photo_category || '').toLowerCase();
+                    // If either category is "item dismantled", no tag pic required
+                    return tagCat !== 'item dismantled' && photoCat !== 'item dismantled';
+                });
+                
+                const tagPicsAvailable = rowsRequiringTagPic.filter(r => r.tag_pic_url && r.tag_pic_url.trim() !== '').length;
+                const tagPicsRequired = rowsRequiringTagPic.length;
+
                 // Prefer W format for display
                 const displayId = p.Site_ID_1 || p.Site_ID || 'Unknown';
 
@@ -114,7 +188,13 @@ export default function PMRView() {
                     status: isSubmitted ? 'Submitted' : 'Pending',
                     submission_count: manualRows.length,
                     total_rows: totalRows,
-                    last_submission_date: isSubmitted ? manualRows[0].updated_at : null
+                    last_submission_date: isSubmitted && manualRows[0].updated_at ? manualRows[0].updated_at : null,
+                    fme_name: p.FME_Name || null,
+                    site_type: p.Site_Type || null,
+                    duplicate_serials: duplicateSerials,
+                    duplicate_tags: duplicateTags,
+                    tag_pics_available: tagPicsAvailable,
+                    tag_pics_required: tagPicsRequired
                 };
             });
 
@@ -190,24 +270,30 @@ export default function PMRView() {
                         <thead className="bg-slate-50 text-xs uppercase text-slate-500 font-semibold">
                             <tr>
                                 <th className="px-6 py-4 border-b">Site ID</th>
+                                <th className="px-6 py-4 border-b">Site Type</th>
+                                <th className="px-6 py-4 border-b">NFO Name</th>
                                 <th className="px-6 py-4 border-b">Planned Date</th>
                                 <th className="px-6 py-4 border-b text-center">Status</th>
                                 <th className="px-6 py-4 border-b text-center">Changes</th>
+                                <th className="px-6 py-4 border-b text-center">Duplicates</th>
+                                <th className="px-6 py-4 border-b text-center">Tag Pictures</th>
                             </tr>
                         </thead>
                         <tbody className="divide-y divide-slate-100 text-sm">
                             {loading ? (
                                 <tr>
-                                    <td colSpan={4} className="px-6 py-12 text-center text-slate-500">Loading plan data...</td>
+                                    <td colSpan={8} className="px-6 py-12 text-center text-slate-500">Loading plan data...</td>
                                 </tr>
                             ) : rows.length === 0 ? (
                                 <tr>
-                                    <td colSpan={4} className="px-6 py-12 text-center text-slate-500">No planned sites found for this date.</td>
+                                    <td colSpan={8} className="px-6 py-12 text-center text-slate-500">No planned sites found for this date.</td>
                                 </tr>
                             ) : (
                                 rows.map((row) => (
                                     <tr key={row.site_id} className="hover:bg-slate-50">
                                         <td className="px-6 py-3 font-medium text-slate-900">{row.site_id}</td>
+                                        <td className="px-6 py-3 text-slate-600">{row.site_type || '-'}</td>
+                                        <td className="px-6 py-3 text-slate-600">{row.fme_name || '-'}</td>
                                         <td className="px-6 py-3 text-slate-600">{row.planned_date}</td>
                                         <td className="px-6 py-3 text-center">
                                             <span className={`inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium ${row.status === 'Submitted'
@@ -226,6 +312,37 @@ export default function PMRView() {
                                                     <span className="text-xs text-slate-500">
                                                         ({row.total_rows > 0 ? Math.round((row.submission_count / row.total_rows) * 100) : 0}%)
                                                     </span>
+                                                </div>
+                                            ) : '-'}
+                                        </td>
+                                        <td className="px-6 py-3 text-center">
+                                            {row.submission_count > 0 ? (
+                                                <div className="flex flex-col items-center gap-1">
+                                                    <span className={`text-xs font-medium ${row.duplicate_serials > 0 ? 'text-red-600' : 'text-green-600'}`}>
+                                                        S: {row.duplicate_serials > 0 ? `${row.duplicate_serials} dup` : '✓'}
+                                                    </span>
+                                                    <span className={`text-xs font-medium ${row.duplicate_tags > 0 ? 'text-red-600' : 'text-green-600'}`}>
+                                                        T: {row.duplicate_tags > 0 ? `${row.duplicate_tags} dup` : '✓'}
+                                                    </span>
+                                                </div>
+                                            ) : '-'}
+                                        </td>
+                                        <td className="px-6 py-3 text-center">
+                                            {row.submission_count > 0 ? (
+                                                <div className="flex flex-col items-center">
+                                                    <span className={`font-semibold ${row.tag_pics_available === row.tag_pics_required && row.tag_pics_required > 0 ? 'text-green-600' : row.tag_pics_available < row.tag_pics_required ? 'text-orange-600' : 'text-slate-900'}`}>
+                                                        {row.tag_pics_available} / {row.tag_pics_required}
+                                                    </span>
+                                                    {row.tag_pics_required > 0 && (
+                                                        <span className="text-xs text-slate-500">
+                                                            ({Math.round((row.tag_pics_available / row.tag_pics_required) * 100)}%)
+                                                        </span>
+                                                    )}
+                                                    {row.tag_pics_available < row.tag_pics_required && (
+                                                        <span className="text-xs text-orange-500">
+                                                            {row.tag_pics_required - row.tag_pics_available} missing
+                                                        </span>
+                                                    )}
                                                 </div>
                                             ) : '-'}
                                         </td>

@@ -1,10 +1,12 @@
 'use client';
 
 import React, { useEffect, useState, useRef } from 'react';
+import { useRouter, useSearchParams, usePathname } from 'next/navigation';
 import { supabase } from '@/lib/supabaseClient';
 import { useAuth } from '@/components/AuthProvider';
 import { compressImage } from '@/lib/imageCompress';
 import ImagePreviewModal from '@/components/ImagePreviewModal';
+import { getParam, setParams } from '@/lib/urlUtils';
 
 interface Suggestion {
   id: string;
@@ -35,6 +37,12 @@ type StatusFilter = (typeof STATUS_OPTIONS)[number];
 
 export default function SuggestionsView() {
   const { user, profile } = useAuth();
+  const router = useRouter();
+  const searchParams = useSearchParams();
+  const pathname = usePathname();
+
+  // --- URL State Initialization ---
+  const initialStatus = getParam(searchParams, 'status', 'pending') as StatusFilter;
 
   // Data state
   const [suggestions, setSuggestions] = useState<Suggestion[]>([]);
@@ -42,7 +50,21 @@ export default function SuggestionsView() {
   const [error, setError] = useState<string | null>(null);
 
   // Filter state
-  const [statusFilter, setStatusFilter] = useState<StatusFilter>('pending');
+  const [statusFilter, setStatusFilterState] = useState<StatusFilter>(initialStatus);
+
+  // --- URL Update Helper ---
+  const setStatusFilter = (value: StatusFilter) => {
+    setStatusFilterState(value);
+    setParams(router, pathname, searchParams, { status: value === 'pending' ? '' : value });
+  };
+
+  // Sync URL changes to state (handles browser back/forward)
+  useEffect(() => {
+    const urlStatus = getParam(searchParams, 'status', 'pending') as StatusFilter;
+    if (urlStatus !== statusFilter) {
+      setStatusFilterState(urlStatus);
+    }
+  }, [searchParams]);
 
   // Add form state
   const [showAddForm, setShowAddForm] = useState(false);

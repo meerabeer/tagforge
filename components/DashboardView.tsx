@@ -1,7 +1,9 @@
 'use client';
 
 import React, { useState, useEffect, useCallback } from 'react';
+import { useRouter, useSearchParams, usePathname } from 'next/navigation';
 import { supabase } from '@/lib/supabaseClient';
+import { getParam, setParams } from '@/lib/urlUtils';
 
 // --- Types ---
 interface PMRPlan {
@@ -17,6 +19,9 @@ interface InventoryRow {
     category: string;
     tag_category: string | null;
     photo_category: string | null;
+    serial_number: string | null;
+    tag_id: string | null;
+    tag_pic_url: string | null;
 }
 
 interface CategoryStats {
@@ -39,6 +44,12 @@ interface SiteStats {
     };
     totalRows: number;
     totalFilled: number;
+    // Data quality metrics
+    duplicate_serials: number;
+    duplicate_tags: number;
+    // Tag pictures metrics
+    tag_pics_available: number;
+    tag_pics_required: number;
 }
 
 type CategoryKey = keyof SiteStats['categories'];
@@ -63,20 +74,74 @@ const CATEGORY_DISPLAY_NAMES: Record<CategoryKey, string> = {
 
 // --- Component ---
 export default function DashboardView() {
+    const router = useRouter();
+    const searchParams = useSearchParams();
+    const pathname = usePathname();
+
+    // --- URL State Initialization ---
+    const initialStartDate = getParam(searchParams, 'startDate', '2026-01-01');
+    const initialEndDate = getParam(searchParams, 'endDate', '2026-01-31');
+    const initialCity = getParam(searchParams, 'city', '');
+    const initialFME = getParam(searchParams, 'fme', '');
+    const initialMonth = getParam(searchParams, 'month', '1');
+    const initialQuarter = getParam(searchParams, 'quarter', '');
+
     // Date range selection
-    const [startDate, setStartDate] = useState<string>('2026-01-01');
-    const [endDate, setEndDate] = useState<string>('2026-01-31');
+    const [startDate, setStartDateState] = useState<string>(initialStartDate);
+    const [endDate, setEndDateState] = useState<string>(initialEndDate);
     
     // Filters
-    const [selectedCity, setSelectedCity] = useState<string>('');
-    const [selectedFME, setSelectedFME] = useState<string>('');
+    const [selectedCity, setSelectedCityState] = useState<string>(initialCity);
+    const [selectedFME, setSelectedFMEState] = useState<string>(initialFME);
     const [cities, setCities] = useState<string[]>([]);
     const [fmeNames, setFmeNames] = useState<string[]>([]);
     const [cityFmeMap, setCityFmeMap] = useState<Map<string, string[]>>(new Map());
     
     // Month/Quarter selection
-    const [selectedMonth, setSelectedMonth] = useState<string>('1');
-    const [selectedQuarter, setSelectedQuarter] = useState<string>('');
+    const [selectedMonth, setSelectedMonthState] = useState<string>(initialMonth);
+    const [selectedQuarter, setSelectedQuarterState] = useState<string>(initialQuarter);
+
+    // --- URL Update Helpers ---
+    const updateUrlParams = useCallback((updates: Record<string, string>) => {
+        setParams(router, pathname, searchParams, updates);
+    }, [router, pathname, searchParams]);
+
+    const setStartDate = (value: string) => {
+        setStartDateState(value);
+        updateUrlParams({ startDate: value });
+    };
+
+    const setEndDate = (value: string) => {
+        setEndDateState(value);
+        updateUrlParams({ endDate: value });
+    };
+
+    const setSelectedCity = (value: string) => {
+        setSelectedCityState(value);
+        updateUrlParams({ city: value });
+    };
+
+    const setSelectedFME = (value: string) => {
+        setSelectedFMEState(value);
+        updateUrlParams({ fme: value });
+    };
+
+    // Sync URL changes to state (handles browser back/forward)
+    useEffect(() => {
+        const urlStartDate = getParam(searchParams, 'startDate', '2026-01-01');
+        const urlEndDate = getParam(searchParams, 'endDate', '2026-01-31');
+        const urlCity = getParam(searchParams, 'city', '');
+        const urlFME = getParam(searchParams, 'fme', '');
+        const urlMonth = getParam(searchParams, 'month', '1');
+        const urlQuarter = getParam(searchParams, 'quarter', '');
+
+        if (urlStartDate !== startDate) setStartDateState(urlStartDate);
+        if (urlEndDate !== endDate) setEndDateState(urlEndDate);
+        if (urlCity !== selectedCity) setSelectedCityState(urlCity);
+        if (urlFME !== selectedFME) setSelectedFMEState(urlFME);
+        if (urlMonth !== selectedMonth) setSelectedMonthState(urlMonth);
+        if (urlQuarter !== selectedQuarter) setSelectedQuarterState(urlQuarter);
+    }, [searchParams]);
     
     // Data
     const [siteStats, setSiteStats] = useState<SiteStats[]>([]);
@@ -89,6 +154,10 @@ export default function DashboardView() {
         totalRows: number;
         totalFilled: number;
         byCategory: Record<CategoryKey, CategoryStats>;
+        totalDuplicateSerials: number;
+        totalDuplicateTags: number;
+        totalTagPicsAvailable: number;
+        totalTagPicsRequired: number;
     } | null>(null);
 
     // Fetch filter options on mount
@@ -217,7 +286,7 @@ export default function DashboardView() {
                 while (hasMore) {
                     const { data, error } = await supabase
                         .from('main_inventory')
-                        .select('site_id, category, tag_category, photo_category')
+                        .select('site_id, category, tag_category, photo_category, serial_number, tag_id, tag_pic_url')
                         .in('site_id', batch)
                         .range(offset, offset + PAGE_SIZE - 1);
                     
@@ -252,6 +321,23 @@ export default function DashboardView() {
                 }
                 inventoryBySite.get(row.site_id)!.push(row);
             });
+
+            // Helper function to count how many values appear more than once
+            const countDuplicateValues = (values: (string | null)[]): number => {
+                const nonNullValues = values.filter(v => v && v.trim() !== '');
+                const countMap = new Map<string, number>();
+                nonNullValues.forEach(v => {
+                    countMap.set(v!, (countMap.get(v!) || 0) + 1);
+                });
+                // Count how many values appear more than once
+                let duplicateValueCount = 0;
+                countMap.forEach((count) => {
+                    if (count > 1) {
+                        duplicateValueCount += count; // Count all instances of duplicates
+                    }
+                });
+                return duplicateValueCount;
+            };
 
             // 5. Calculate stats per site
             const results: SiteStats[] = plans.map(plan => {
@@ -292,6 +378,24 @@ export default function DashboardView() {
                     totalFilled += categories[cat].filled;
                 });
 
+                // Calculate duplicates across ALL site rows
+                const allSerials = allRows.map(r => r.serial_number);
+                const allTags = allRows.map(r => r.tag_id);
+                const duplicateSerials = countDuplicateValues(allSerials);
+                const duplicateTags = countDuplicateValues(allTags);
+
+                // Calculate tag pictures metrics
+                // Only count rows where tag_category AND photo_category are NOT "Item dismantled"
+                const rowsRequiringTagPic = allRows.filter(r => {
+                    const tagCat = (r.tag_category || '').toLowerCase();
+                    const photoCat = (r.photo_category || '').toLowerCase();
+                    // If either category is "item dismantled", no tag pic required
+                    return tagCat !== 'item dismantled' && photoCat !== 'item dismantled';
+                });
+                
+                const tagPicsAvailable = rowsRequiringTagPic.filter(r => r.tag_pic_url && r.tag_pic_url.trim() !== '').length;
+                const tagPicsRequired = rowsRequiringTagPic.length;
+
                 return {
                     site_id: displayId,
                     planned_date: plan.Planned_PMR_Date,
@@ -300,6 +404,10 @@ export default function DashboardView() {
                     categories,
                     totalRows,
                     totalFilled,
+                    duplicate_serials: duplicateSerials,
+                    duplicate_tags: duplicateTags,
+                    tag_pics_available: tagPicsAvailable,
+                    tag_pics_required: tagPicsRequired,
                 };
             });
 
@@ -317,6 +425,10 @@ export default function DashboardView() {
 
             let aggTotalRows = 0;
             let aggTotalFilled = 0;
+            let aggDuplicateSerials = 0;
+            let aggDuplicateTags = 0;
+            let aggTagPicsAvailable = 0;
+            let aggTagPicsRequired = 0;
 
             results.forEach(site => {
                 CATEGORIES.forEach(cat => {
@@ -325,6 +437,10 @@ export default function DashboardView() {
                 });
                 aggTotalRows += site.totalRows;
                 aggTotalFilled += site.totalFilled;
+                aggDuplicateSerials += site.duplicate_serials;
+                aggDuplicateTags += site.duplicate_tags;
+                aggTagPicsAvailable += site.tag_pics_available;
+                aggTagPicsRequired += site.tag_pics_required;
             });
 
             setAggregatedStats({
@@ -332,6 +448,10 @@ export default function DashboardView() {
                 totalRows: aggTotalRows,
                 totalFilled: aggTotalFilled,
                 byCategory: aggByCategory,
+                totalDuplicateSerials: aggDuplicateSerials,
+                totalDuplicateTags: aggDuplicateTags,
+                totalTagPicsAvailable: aggTagPicsAvailable,
+                totalTagPicsRequired: aggTagPicsRequired,
             });
 
         } catch (err) {
@@ -372,23 +492,35 @@ export default function DashboardView() {
     
     // Handle month selection
     const handleMonthChange = (monthValue: string) => {
-        setSelectedMonth(monthValue);
-        setSelectedQuarter(''); // Clear quarter when month is selected
         const month = MONTHS.find(m => m.value === monthValue);
         if (month) {
-            setStartDate(month.start);
-            setEndDate(month.end);
+            setSelectedMonthState(monthValue);
+            setSelectedQuarterState('');
+            setStartDateState(month.start);
+            setEndDateState(month.end);
+            updateUrlParams({ 
+                month: monthValue, 
+                quarter: '', 
+                startDate: month.start, 
+                endDate: month.end 
+            });
         }
     };
     
     // Handle quarter selection
     const handleQuarterChange = (quarterValue: string) => {
-        setSelectedQuarter(quarterValue);
-        setSelectedMonth(''); // Clear month when quarter is selected
         const quarter = QUARTERS.find(q => q.value === quarterValue);
         if (quarter) {
-            setStartDate(quarter.start);
-            setEndDate(quarter.end);
+            setSelectedQuarterState(quarterValue);
+            setSelectedMonthState('');
+            setStartDateState(quarter.start);
+            setEndDateState(quarter.end);
+            updateUrlParams({ 
+                quarter: quarterValue, 
+                month: '', 
+                startDate: quarter.start, 
+                endDate: quarter.end 
+            });
         }
     };
 
@@ -497,7 +629,11 @@ export default function DashboardView() {
                         {/* Clear Filters */}
                         {(selectedCity || selectedFME) && (
                             <button
-                                onClick={() => { setSelectedCity(''); setSelectedFME(''); }}
+                                onClick={() => { 
+                                    setSelectedCityState(''); 
+                                    setSelectedFMEState(''); 
+                                    updateUrlParams({ city: '', fme: '' });
+                                }}
                                 className="px-3 py-2 text-sm font-medium text-red-600 bg-red-50 hover:bg-red-100 rounded-md transition-colors"
                             >
                                 Clear Filters
@@ -545,7 +681,7 @@ export default function DashboardView() {
                         <h3 className="text-lg font-semibold text-slate-900 mb-4">Overall Summary</h3>
                         
                         {/* Top Level Stats */}
-                        <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mb-6">
+                        <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-4 mb-6">
                             <div className="bg-slate-50 rounded-lg p-4">
                                 <div className="text-2xl font-bold text-slate-900">{aggregatedStats.totalSites}</div>
                                 <div className="text-sm text-slate-600">Total Sites</div>
@@ -563,6 +699,25 @@ export default function DashboardView() {
                                     {getPercentage(aggregatedStats.totalFilled, aggregatedStats.totalRows)}%
                                 </div>
                                 <div className="text-sm text-slate-600">Overall Completion</div>
+                            </div>
+                            <div className={`rounded-lg p-4 ${aggregatedStats.totalDuplicateSerials + aggregatedStats.totalDuplicateTags > 0 ? 'bg-red-50' : 'bg-green-50'}`}>
+                                <div className="flex flex-col gap-1">
+                                    <div className={`text-lg font-bold ${aggregatedStats.totalDuplicateSerials > 0 ? 'text-red-600' : 'text-green-600'}`}>
+                                        S: {aggregatedStats.totalDuplicateSerials > 0 ? aggregatedStats.totalDuplicateSerials : '✓'}
+                                    </div>
+                                    <div className={`text-lg font-bold ${aggregatedStats.totalDuplicateTags > 0 ? 'text-red-600' : 'text-green-600'}`}>
+                                        T: {aggregatedStats.totalDuplicateTags > 0 ? aggregatedStats.totalDuplicateTags : '✓'}
+                                    </div>
+                                </div>
+                                <div className="text-sm text-slate-600">Duplicates</div>
+                            </div>
+                            <div className={`rounded-lg p-4 ${aggregatedStats.totalTagPicsAvailable === aggregatedStats.totalTagPicsRequired ? 'bg-green-50' : 'bg-orange-50'}`}>
+                                <div className={`text-2xl font-bold ${aggregatedStats.totalTagPicsAvailable === aggregatedStats.totalTagPicsRequired ? 'text-green-600' : 'text-orange-600'}`}>
+                                    {aggregatedStats.totalTagPicsAvailable}/{aggregatedStats.totalTagPicsRequired}
+                                </div>
+                                <div className="text-sm text-slate-600">
+                                    Tag Pictures ({aggregatedStats.totalTagPicsRequired > 0 ? Math.round((aggregatedStats.totalTagPicsAvailable / aggregatedStats.totalTagPicsRequired) * 100) : 0}%)
+                                </div>
                             </div>
                         </div>
 
@@ -612,6 +767,8 @@ export default function DashboardView() {
                                             </th>
                                         ))}
                                         <th className="text-center px-4 py-3 font-medium text-slate-700">Total</th>
+                                        <th className="text-center px-3 py-3 font-medium text-slate-700">Duplicates</th>
+                                        <th className="text-center px-3 py-3 font-medium text-slate-700">Tag Pics</th>
                                         <th className="text-center px-4 py-3 font-medium text-slate-700">Completion</th>
                                     </tr>
                                 </thead>
@@ -624,6 +781,10 @@ export default function DashboardView() {
                                             categories: Record<CategoryKey, CategoryStats>;
                                             totalRows: number;
                                             totalFilled: number;
+                                            duplicate_serials: number;
+                                            duplicate_tags: number;
+                                            tag_pics_available: number;
+                                            tag_pics_required: number;
                                         }>();
                                         
                                         siteStats.forEach(site => {
@@ -642,6 +803,10 @@ export default function DashboardView() {
                                                     },
                                                     totalRows: 0,
                                                     totalFilled: 0,
+                                                    duplicate_serials: 0,
+                                                    duplicate_tags: 0,
+                                                    tag_pics_available: 0,
+                                                    tag_pics_required: 0,
                                                 });
                                             }
                                             const data = cityMap.get(city)!;
@@ -653,6 +818,10 @@ export default function DashboardView() {
                                             });
                                             data.totalRows += site.totalRows;
                                             data.totalFilled += site.totalFilled;
+                                            data.duplicate_serials += site.duplicate_serials;
+                                            data.duplicate_tags += site.duplicate_tags;
+                                            data.tag_pics_available += site.tag_pics_available;
+                                            data.tag_pics_required += site.tag_pics_required;
                                         });
                                         
                                         // Sort by completion percentage descending
@@ -685,6 +854,23 @@ export default function DashboardView() {
                                                     })}
                                                     <td className="px-4 py-3 text-center text-slate-700">
                                                         {data.totalFilled}/{data.totalRows}
+                                                    </td>
+                                                    <td className="px-3 py-3 text-center">
+                                                        <div className="flex flex-col items-center gap-0.5">
+                                                            <span className={`text-xs font-medium ${data.duplicate_serials > 0 ? 'text-red-600' : 'text-green-600'}`}>
+                                                                S: {data.duplicate_serials > 0 ? data.duplicate_serials : '✓'}
+                                                            </span>
+                                                            <span className={`text-xs font-medium ${data.duplicate_tags > 0 ? 'text-red-600' : 'text-green-600'}`}>
+                                                                T: {data.duplicate_tags > 0 ? data.duplicate_tags : '✓'}
+                                                            </span>
+                                                        </div>
+                                                    </td>
+                                                    <td className="px-3 py-3 text-center">
+                                                        {data.tag_pics_required > 0 ? (
+                                                            <span className={`text-xs font-medium ${data.tag_pics_available === data.tag_pics_required ? 'text-green-600' : 'text-orange-600'}`}>
+                                                                {data.tag_pics_available}/{data.tag_pics_required}
+                                                            </span>
+                                                        ) : '-'}
                                                     </td>
                                                     <td className="px-4 py-3 text-center">
                                                         <div className="flex items-center justify-center gap-2">
@@ -723,6 +909,8 @@ export default function DashboardView() {
                                             </th>
                                         ))}
                                         <th className="text-center px-4 py-3 font-medium text-slate-700">Total</th>
+                                        <th className="text-center px-3 py-3 font-medium text-slate-700">Duplicates</th>
+                                        <th className="text-center px-3 py-3 font-medium text-slate-700">Tag Pics</th>
                                         <th className="text-center px-4 py-3 font-medium text-slate-700">Completion</th>
                                     </tr>
                                 </thead>
@@ -735,6 +923,10 @@ export default function DashboardView() {
                                             categories: Record<CategoryKey, CategoryStats>;
                                             totalRows: number;
                                             totalFilled: number;
+                                            duplicate_serials: number;
+                                            duplicate_tags: number;
+                                            tag_pics_available: number;
+                                            tag_pics_required: number;
                                         }>();
                                         
                                         siteStats.forEach(site => {
@@ -753,6 +945,10 @@ export default function DashboardView() {
                                                     },
                                                     totalRows: 0,
                                                     totalFilled: 0,
+                                                    duplicate_serials: 0,
+                                                    duplicate_tags: 0,
+                                                    tag_pics_available: 0,
+                                                    tag_pics_required: 0,
                                                 });
                                             }
                                             const data = nfoMap.get(nfo)!;
@@ -764,6 +960,10 @@ export default function DashboardView() {
                                             });
                                             data.totalRows += site.totalRows;
                                             data.totalFilled += site.totalFilled;
+                                            data.duplicate_serials += site.duplicate_serials;
+                                            data.duplicate_tags += site.duplicate_tags;
+                                            data.tag_pics_available += site.tag_pics_available;
+                                            data.tag_pics_required += site.tag_pics_required;
                                         });
                                         
                                         // Sort by completion percentage descending
@@ -798,6 +998,23 @@ export default function DashboardView() {
                                                     })}
                                                     <td className="px-4 py-3 text-center text-slate-700">
                                                         {data.totalFilled}/{data.totalRows}
+                                                    </td>
+                                                    <td className="px-3 py-3 text-center">
+                                                        <div className="flex flex-col items-center gap-0.5">
+                                                            <span className={`text-xs font-medium ${data.duplicate_serials > 0 ? 'text-red-600' : 'text-green-600'}`}>
+                                                                S: {data.duplicate_serials > 0 ? data.duplicate_serials : '✓'}
+                                                            </span>
+                                                            <span className={`text-xs font-medium ${data.duplicate_tags > 0 ? 'text-red-600' : 'text-green-600'}`}>
+                                                                T: {data.duplicate_tags > 0 ? data.duplicate_tags : '✓'}
+                                                            </span>
+                                                        </div>
+                                                    </td>
+                                                    <td className="px-3 py-3 text-center">
+                                                        {data.tag_pics_required > 0 ? (
+                                                            <span className={`text-xs font-medium ${data.tag_pics_available === data.tag_pics_required ? 'text-green-600' : 'text-orange-600'}`}>
+                                                                {data.tag_pics_available}/{data.tag_pics_required}
+                                                            </span>
+                                                        ) : '-'}
                                                     </td>
                                                     <td className="px-4 py-3 text-center">
                                                         <div className="flex items-center justify-center gap-2">
@@ -842,6 +1059,8 @@ export default function DashboardView() {
                                         ))}
                                         <th className="text-center px-4 py-3 font-medium text-slate-700">Total</th>
                                         <th className="text-center px-4 py-3 font-medium text-slate-700">%</th>
+                                        <th className="text-center px-4 py-3 font-medium text-slate-700">Duplicates</th>
+                                        <th className="text-center px-4 py-3 font-medium text-slate-700">Tag Pics</th>
                                     </tr>
                                 </thead>
                                 <tbody className="divide-y divide-slate-100">
@@ -892,6 +1111,33 @@ export default function DashboardView() {
                                                     }`}>
                                                         {overallPct}%
                                                     </span>
+                                                </td>
+                                                <td className="px-4 py-3 text-center">
+                                                    <div className="flex flex-col items-center gap-0.5">
+                                                        <span className={`text-xs font-medium ${site.duplicate_serials > 0 ? 'text-red-600' : 'text-green-600'}`}>
+                                                            S: {site.duplicate_serials > 0 ? site.duplicate_serials : '✓'}
+                                                        </span>
+                                                        <span className={`text-xs font-medium ${site.duplicate_tags > 0 ? 'text-red-600' : 'text-green-600'}`}>
+                                                            T: {site.duplicate_tags > 0 ? site.duplicate_tags : '✓'}
+                                                        </span>
+                                                    </div>
+                                                </td>
+                                                <td className="px-4 py-3 text-center">
+                                                    {site.tag_pics_required > 0 ? (
+                                                        <div className="flex flex-col items-center">
+                                                            <span className={`font-medium ${
+                                                                site.tag_pics_available === site.tag_pics_required ? 'text-green-600' : 
+                                                                site.tag_pics_available < site.tag_pics_required ? 'text-orange-600' : 'text-slate-900'
+                                                            }`}>
+                                                                {site.tag_pics_available}/{site.tag_pics_required}
+                                                            </span>
+                                                            <span className="text-xs text-slate-500">
+                                                                ({Math.round((site.tag_pics_available / site.tag_pics_required) * 100)}%)
+                                                            </span>
+                                                        </div>
+                                                    ) : (
+                                                        <span className="text-slate-400">-</span>
+                                                    )}
                                                 </td>
                                             </tr>
                                         );
