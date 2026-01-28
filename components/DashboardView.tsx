@@ -595,6 +595,230 @@ export default function DashboardView() {
                     </div>
                 )}
 
+                {/* Area Performance Summary */}
+                {siteStats.length > 0 && (
+                    <div className="bg-white border border-slate-200 rounded-lg p-6 mb-4 shadow-sm">
+                        <h3 className="text-lg font-semibold text-slate-900 mb-4">Area Performance</h3>
+                        <div className="overflow-x-auto">
+                            <table className="w-full text-sm">
+                                <thead className="bg-slate-50 border-b border-slate-200">
+                                    <tr>
+                                        <th className="text-left px-4 py-3 font-medium text-slate-700">Area/City</th>
+                                        <th className="text-center px-3 py-3 font-medium text-slate-700">Sites</th>
+                                        <th className="text-center px-3 py-3 font-medium text-slate-700">NFOs</th>
+                                        {CATEGORIES.map(cat => (
+                                            <th key={cat} className="text-center px-3 py-3 font-medium text-slate-700 whitespace-nowrap text-xs">
+                                                {CATEGORY_DISPLAY_NAMES[cat]}
+                                            </th>
+                                        ))}
+                                        <th className="text-center px-4 py-3 font-medium text-slate-700">Total</th>
+                                        <th className="text-center px-4 py-3 font-medium text-slate-700">Completion</th>
+                                    </tr>
+                                </thead>
+                                <tbody className="divide-y divide-slate-100">
+                                    {(() => {
+                                        // Aggregate by city
+                                        const cityMap = new Map<string, {
+                                            sites: Set<string>;
+                                            nfos: Set<string>;
+                                            categories: Record<CategoryKey, CategoryStats>;
+                                            totalRows: number;
+                                            totalFilled: number;
+                                        }>();
+                                        
+                                        siteStats.forEach(site => {
+                                            const city = site.city || 'Unknown';
+                                            if (!cityMap.has(city)) {
+                                                cityMap.set(city, {
+                                                    sites: new Set(),
+                                                    nfos: new Set(),
+                                                    categories: {
+                                                        'Enclosure-Active': { total: 0, filled: 0 },
+                                                        'Enclosure-Passive': { total: 0, filled: 0 },
+                                                        'RAN-Active': { total: 0, filled: 0 },
+                                                        'RAN-Passive': { total: 0, filled: 0 },
+                                                        'MW-Active': { total: 0, filled: 0 },
+                                                        'MW-Passive': { total: 0, filled: 0 },
+                                                    },
+                                                    totalRows: 0,
+                                                    totalFilled: 0,
+                                                });
+                                            }
+                                            const data = cityMap.get(city)!;
+                                            data.sites.add(site.site_id);
+                                            if (site.fme_name) data.nfos.add(site.fme_name);
+                                            CATEGORIES.forEach(cat => {
+                                                data.categories[cat].total += site.categories[cat].total;
+                                                data.categories[cat].filled += site.categories[cat].filled;
+                                            });
+                                            data.totalRows += site.totalRows;
+                                            data.totalFilled += site.totalFilled;
+                                        });
+                                        
+                                        // Sort by completion percentage descending
+                                        const sortedCities = Array.from(cityMap.entries())
+                                            .sort((a, b) => {
+                                                const pctA = a[1].totalRows > 0 ? a[1].totalFilled / a[1].totalRows : 0;
+                                                const pctB = b[1].totalRows > 0 ? b[1].totalFilled / b[1].totalRows : 0;
+                                                return pctB - pctA;
+                                            });
+                                        
+                                        return sortedCities.map(([city, data]) => {
+                                            const overallPct = getPercentage(data.totalFilled, data.totalRows);
+                                            return (
+                                                <tr key={city} className="hover:bg-slate-50">
+                                                    <td className="px-4 py-3 font-medium text-slate-900">{city}</td>
+                                                    <td className="px-3 py-3 text-center text-slate-700">{data.sites.size}</td>
+                                                    <td className="px-3 py-3 text-center text-slate-700">{data.nfos.size}</td>
+                                                    {CATEGORIES.map(cat => {
+                                                        const stats = data.categories[cat];
+                                                        const pct = getPercentage(stats.filled, stats.total);
+                                                        return (
+                                                            <td key={cat} className="px-3 py-3 text-center text-xs">
+                                                                {stats.total > 0 ? (
+                                                                    <span className={`${pct >= 80 ? 'text-green-600' : pct >= 50 ? 'text-yellow-600' : 'text-red-600'}`}>
+                                                                        {pct}%
+                                                                    </span>
+                                                                ) : '-'}
+                                                            </td>
+                                                        );
+                                                    })}
+                                                    <td className="px-4 py-3 text-center text-slate-700">
+                                                        {data.totalFilled}/{data.totalRows}
+                                                    </td>
+                                                    <td className="px-4 py-3 text-center">
+                                                        <div className="flex items-center justify-center gap-2">
+                                                            <div className="w-16 h-2 bg-slate-200 rounded-full overflow-hidden">
+                                                                <div className={`h-full ${getProgressColor(overallPct)}`} style={{ width: `${overallPct}%` }} />
+                                                            </div>
+                                                            <span className={`text-sm font-medium ${overallPct >= 80 ? 'text-green-600' : overallPct >= 50 ? 'text-yellow-600' : 'text-red-600'}`}>
+                                                                {overallPct}%
+                                                            </span>
+                                                        </div>
+                                                    </td>
+                                                </tr>
+                                            );
+                                        });
+                                    })()}
+                                </tbody>
+                            </table>
+                        </div>
+                    </div>
+                )}
+
+                {/* NFO Performance Summary */}
+                {siteStats.length > 0 && (
+                    <div className="bg-white border border-slate-200 rounded-lg p-6 mb-4 shadow-sm">
+                        <h3 className="text-lg font-semibold text-slate-900 mb-4">NFO Performance</h3>
+                        <div className="overflow-x-auto max-h-96">
+                            <table className="w-full text-sm">
+                                <thead className="bg-slate-50 border-b border-slate-200 sticky top-0">
+                                    <tr>
+                                        <th className="text-left px-4 py-3 font-medium text-slate-700">NFO Name</th>
+                                        <th className="text-left px-3 py-3 font-medium text-slate-700">Area</th>
+                                        <th className="text-center px-3 py-3 font-medium text-slate-700">Sites</th>
+                                        {CATEGORIES.map(cat => (
+                                            <th key={cat} className="text-center px-3 py-3 font-medium text-slate-700 whitespace-nowrap text-xs">
+                                                {CATEGORY_DISPLAY_NAMES[cat]}
+                                            </th>
+                                        ))}
+                                        <th className="text-center px-4 py-3 font-medium text-slate-700">Total</th>
+                                        <th className="text-center px-4 py-3 font-medium text-slate-700">Completion</th>
+                                    </tr>
+                                </thead>
+                                <tbody className="divide-y divide-slate-100">
+                                    {(() => {
+                                        // Aggregate by NFO
+                                        const nfoMap = new Map<string, {
+                                            cities: Set<string>;
+                                            sites: Set<string>;
+                                            categories: Record<CategoryKey, CategoryStats>;
+                                            totalRows: number;
+                                            totalFilled: number;
+                                        }>();
+                                        
+                                        siteStats.forEach(site => {
+                                            const nfo = site.fme_name || 'Unknown';
+                                            if (!nfoMap.has(nfo)) {
+                                                nfoMap.set(nfo, {
+                                                    cities: new Set(),
+                                                    sites: new Set(),
+                                                    categories: {
+                                                        'Enclosure-Active': { total: 0, filled: 0 },
+                                                        'Enclosure-Passive': { total: 0, filled: 0 },
+                                                        'RAN-Active': { total: 0, filled: 0 },
+                                                        'RAN-Passive': { total: 0, filled: 0 },
+                                                        'MW-Active': { total: 0, filled: 0 },
+                                                        'MW-Passive': { total: 0, filled: 0 },
+                                                    },
+                                                    totalRows: 0,
+                                                    totalFilled: 0,
+                                                });
+                                            }
+                                            const data = nfoMap.get(nfo)!;
+                                            if (site.city) data.cities.add(site.city);
+                                            data.sites.add(site.site_id);
+                                            CATEGORIES.forEach(cat => {
+                                                data.categories[cat].total += site.categories[cat].total;
+                                                data.categories[cat].filled += site.categories[cat].filled;
+                                            });
+                                            data.totalRows += site.totalRows;
+                                            data.totalFilled += site.totalFilled;
+                                        });
+                                        
+                                        // Sort by completion percentage descending
+                                        const sortedNFOs = Array.from(nfoMap.entries())
+                                            .sort((a, b) => {
+                                                const pctA = a[1].totalRows > 0 ? a[1].totalFilled / a[1].totalRows : 0;
+                                                const pctB = b[1].totalRows > 0 ? b[1].totalFilled / b[1].totalRows : 0;
+                                                return pctB - pctA;
+                                            });
+                                        
+                                        return sortedNFOs.map(([nfo, data]) => {
+                                            const overallPct = getPercentage(data.totalFilled, data.totalRows);
+                                            return (
+                                                <tr key={nfo} className="hover:bg-slate-50">
+                                                    <td className="px-4 py-3 font-medium text-slate-900">{nfo}</td>
+                                                    <td className="px-3 py-3 text-slate-600 text-xs">
+                                                        {Array.from(data.cities).join(', ')}
+                                                    </td>
+                                                    <td className="px-3 py-3 text-center text-slate-700">{data.sites.size}</td>
+                                                    {CATEGORIES.map(cat => {
+                                                        const stats = data.categories[cat];
+                                                        const pct = getPercentage(stats.filled, stats.total);
+                                                        return (
+                                                            <td key={cat} className="px-3 py-3 text-center text-xs">
+                                                                {stats.total > 0 ? (
+                                                                    <span className={`${pct >= 80 ? 'text-green-600' : pct >= 50 ? 'text-yellow-600' : 'text-red-600'}`}>
+                                                                        {pct}%
+                                                                    </span>
+                                                                ) : '-'}
+                                                            </td>
+                                                        );
+                                                    })}
+                                                    <td className="px-4 py-3 text-center text-slate-700">
+                                                        {data.totalFilled}/{data.totalRows}
+                                                    </td>
+                                                    <td className="px-4 py-3 text-center">
+                                                        <div className="flex items-center justify-center gap-2">
+                                                            <div className="w-16 h-2 bg-slate-200 rounded-full overflow-hidden">
+                                                                <div className={`h-full ${getProgressColor(overallPct)}`} style={{ width: `${overallPct}%` }} />
+                                                            </div>
+                                                            <span className={`text-sm font-medium ${overallPct >= 80 ? 'text-green-600' : overallPct >= 50 ? 'text-yellow-600' : 'text-red-600'}`}>
+                                                                {overallPct}%
+                                                            </span>
+                                                        </div>
+                                                    </td>
+                                                </tr>
+                                            );
+                                        });
+                                    })()}
+                                </tbody>
+                            </table>
+                        </div>
+                    </div>
+                )}
+
                 {/* Per-Site Table */}
                 {siteStats.length > 0 && (
                     <div className="bg-white border border-slate-200 rounded-lg shadow-sm overflow-hidden">
