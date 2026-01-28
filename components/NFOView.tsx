@@ -148,6 +148,15 @@ export default function NFOView() {
 
   // Image Preview State
   const [previewUrl, setPreviewUrl] = useState<string | null>(null);
+
+  // Duplicate Cleanup State
+  const [showCleanupModal, setShowCleanupModal] = useState(false);
+  const [cleanupLoading, setCleanupLoading] = useState(false);
+  const [cleanupPreview, setCleanupPreview] = useState<{
+    rule: 1 | 2 | 3;
+    rowsToDelete: InventoryRow[];
+    protectedRows: InventoryRow[]; // Rows with pictures that won't be deleted
+  } | null>(null);
   const [previewTitle, setPreviewTitle] = useState('');
 
   const openPreview = (url: string | null, title: string) => {
@@ -1177,6 +1186,209 @@ export default function NFOView() {
     }
   };
 
+  // --- Duplicate Cleanup Functions ---
+  
+  // Helper: Check if row has any picture
+  const rowHasPicture = (row: InventoryRow): boolean => {
+    return !!(row.serial_pic_url?.trim() || row.tag_pic_url?.trim());
+  };
+  
+  // Rule 1: Find rows with exact same (Serial, Tag) combo - keep rows with pictures, then oldest
+  const findRule1Duplicates = (): { toDelete: InventoryRow[]; protected: InventoryRow[] } => {
+    const comboMap = new Map<string, InventoryRow[]>();
+    
+    allSiteRows.forEach(row => {
+      const serial = (row.serial_number || '').trim().toLowerCase();
+      const tag = (row.tag_id || '').trim().toLowerCase();
+      
+      // Only consider rows with both serial AND tag
+      if (!serial || !tag) return;
+      
+      const key = `${serial}|${tag}`;
+      const existing = comboMap.get(key) || [];
+      existing.push(row);
+      comboMap.set(key, existing);
+    });
+    
+    const toDelete: InventoryRow[] = [];
+    const protectedRows: InventoryRow[] = [];
+    
+    comboMap.forEach(rows => {
+      if (rows.length > 1) {
+        // Sort: rows WITH pictures first, then by updated_at ascending (oldest first)
+        const sorted = [...rows].sort((a, b) => {
+          const aHasPic = rowHasPicture(a);
+          const bHasPic = rowHasPicture(b);
+          
+          // Prioritize rows with pictures
+          if (aHasPic && !bHasPic) return -1;
+          if (!aHasPic && bHasPic) return 1;
+          
+          // Same picture status, sort by oldest first
+          const aTime = a.updated_at ? new Date(a.updated_at).getTime() : 0;
+          const bTime = b.updated_at ? new Date(b.updated_at).getTime() : 0;
+          return aTime - bTime;
+        });
+        
+        // Keep first (has picture or oldest), mark rest for deletion/protection
+        const candidates = sorted.slice(1);
+        candidates.forEach(row => {
+          if (rowHasPicture(row)) {
+            protectedRows.push(row);
+          } else {
+            toDelete.push(row);
+          }
+        });
+      }
+    });
+    
+    return { toDelete, protected: protectedRows };
+  };
+  
+  // Rule 2: Find NO-Tag rows where same Serial has a Tag elsewhere
+  const findRule2Duplicates = (): { toDelete: InventoryRow[]; protected: InventoryRow[] } => {
+    // First, find all serials that have at least one tagged row
+    const serialsWithTags = new Set<string>();
+    
+    allSiteRows.forEach(row => {
+      const serial = (row.serial_number || '').trim().toLowerCase();
+      const tag = (row.tag_id || '').trim();
+      
+      if (serial && tag) {
+        serialsWithTags.add(serial);
+      }
+    });
+    
+    // Now find rows with no tag where the serial HAS a tag elsewhere
+    const toDelete: InventoryRow[] = [];
+    const protectedRows: InventoryRow[] = [];
+    
+    allSiteRows.forEach(row => {
+      const serial = (row.serial_number || '').trim().toLowerCase();
+      const tag = (row.tag_id || '').trim();
+      
+      if (serial && !tag && serialsWithTags.has(serial)) {
+        if (rowHasPicture(row)) {
+          protectedRows.push(row);
+        } else {
+          toDelete.push(row);
+        }
+      }
+    });
+    
+    return { toDelete, protected: protectedRows };
+  };
+  
+  // Rule 3: Find duplicate Serials in NO-Tag-only subset (serial never tagged anywhere)
+  const findRule3Duplicates = (): { toDelete: InventoryRow[]; protected: InventoryRow[] } => {
+    // First, find all serials that have at least one tagged row
+    const serialsWithTags = new Set<string>();
+    
+    allSiteRows.forEach(row => {
+      const serial = (row.serial_number || '').trim().toLowerCase();
+      const tag = (row.tag_id || '').trim();
+      
+      if (serial && tag) {
+        serialsWithTags.add(serial);
+      }
+    });
+    
+    // Now group NO-tag rows by serial (only serials that are NEVER tagged)
+    const noTagSerialMap = new Map<string, InventoryRow[]>();
+    
+    allSiteRows.forEach(row => {
+      const serial = (row.serial_number || '').trim().toLowerCase();
+      const tag = (row.tag_id || '').trim();
+      
+      // Only consider rows with serial but no tag, AND serial is never tagged anywhere
+      if (serial && !tag && !serialsWithTags.has(serial)) {
+        const existing = noTagSerialMap.get(serial) || [];
+        existing.push(row);
+        noTagSerialMap.set(serial, existing);
+      }
+    });
+    
+    const toDelete: InventoryRow[] = [];
+    const protectedRows: InventoryRow[] = [];
+    
+    noTagSerialMap.forEach(rows => {
+      if (rows.length > 1) {
+        // Sort: rows WITH pictures first, then by updated_at ascending (oldest first)
+        const sorted = [...rows].sort((a, b) => {
+          const aHasPic = rowHasPicture(a);
+          const bHasPic = rowHasPicture(b);
+          
+          // Prioritize rows with pictures
+          if (aHasPic && !bHasPic) return -1;
+          if (!aHasPic && bHasPic) return 1;
+          
+          // Same picture status, sort by oldest first
+          const aTime = a.updated_at ? new Date(a.updated_at).getTime() : 0;
+          const bTime = b.updated_at ? new Date(b.updated_at).getTime() : 0;
+          return aTime - bTime;
+        });
+        
+        // Keep first (has picture or oldest), mark rest for deletion/protection
+        const candidates = sorted.slice(1);
+        candidates.forEach(row => {
+          if (rowHasPicture(row)) {
+            protectedRows.push(row);
+          } else {
+            toDelete.push(row);
+          }
+        });
+      }
+    });
+    
+    return { toDelete, protected: protectedRows };
+  };
+  
+  const previewCleanup = (rule: 1 | 2 | 3) => {
+    let result: { toDelete: InventoryRow[]; protected: InventoryRow[] };
+    
+    switch (rule) {
+      case 1:
+        result = findRule1Duplicates();
+        break;
+      case 2:
+        result = findRule2Duplicates();
+        break;
+      case 3:
+        result = findRule3Duplicates();
+        break;
+    }
+    
+    setCleanupPreview({ rule, rowsToDelete: result.toDelete, protectedRows: result.protected });
+  };
+  
+  const executeCleanup = async () => {
+    if (!cleanupPreview || cleanupPreview.rowsToDelete.length === 0) return;
+    
+    const rowIds = cleanupPreview.rowsToDelete.map(r => r.id);
+    
+    setCleanupLoading(true);
+    try {
+      const { error } = await supabase
+        .from('main_inventory')
+        .delete()
+        .in('id', rowIds);
+      
+      if (error) throw error;
+      
+      // Update local state
+      setAllSiteRows(prev => prev.filter(r => !rowIds.includes(r.id)));
+      
+      alert(`Successfully deleted ${rowIds.length} duplicate rows.`);
+      setCleanupPreview(null);
+      setShowCleanupModal(false);
+      
+    } catch (err: any) {
+      alert('Failed to delete rows: ' + err.message);
+    } finally {
+      setCleanupLoading(false);
+    }
+  };
+
   const handleDeleteImage = async (rowId: string, kind: 'serial' | 'tag') => {
     if (!confirm('Delete this picture?')) return;
 
@@ -1378,13 +1590,25 @@ export default function NFOView() {
                 Showing <span className="font-semibold">{visibleRowsInTab.length}</span> row
                 {visibleRowsInTab.length !== 1 ? 's' : ''}
               </div>
-              <button
-                onClick={beginAddNew}
-                disabled={saving || !searched || isAddingNew}
-                className="px-3 py-1.5 rounded-md bg-green-600 text-white text-sm font-medium hover:bg-green-700 disabled:opacity-50 disabled:cursor-not-allowed"
-              >
-                + Add Row
-              </button>
+              <div className="flex items-center gap-2">
+                <button
+                  onClick={() => {
+                    setShowCleanupModal(true);
+                    setCleanupPreview(null);
+                  }}
+                  disabled={saving || allSiteRows.length === 0}
+                  className="px-3 py-1.5 rounded-md bg-orange-500 text-white text-sm font-medium hover:bg-orange-600 disabled:opacity-50 disabled:cursor-not-allowed"
+                >
+                  🧹 Clean Duplicates
+                </button>
+                <button
+                  onClick={beginAddNew}
+                  disabled={saving || !searched || isAddingNew}
+                  className="px-3 py-1.5 rounded-md bg-green-600 text-white text-sm font-medium hover:bg-green-700 disabled:opacity-50 disabled:cursor-not-allowed"
+                >
+                  + Add Row
+                </button>
+              </div>
             </div>
 
 
@@ -2234,6 +2458,209 @@ export default function NFOView() {
           </div>
         )
       }
+
+      {/* Duplicate Cleanup Modal */}
+      {showCleanupModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50">
+          <div className="bg-white rounded-lg shadow-xl w-full max-w-2xl max-h-[85vh] overflow-hidden">
+            <div className="px-6 py-4 border-b border-slate-200 flex items-center justify-between">
+              <h3 className="text-lg font-semibold text-slate-900">🧹 Clean Duplicate Rows</h3>
+              <button
+                onClick={() => {
+                  setShowCleanupModal(false);
+                  setCleanupPreview(null);
+                }}
+                className="text-slate-400 hover:text-slate-600 text-xl"
+              >
+                ×
+              </button>
+            </div>
+            
+            <div className="p-6 overflow-y-auto max-h-[calc(85vh-120px)]">
+              {!cleanupPreview ? (
+                <div className="space-y-4">
+                  <p className="text-sm text-slate-600 mb-4">
+                    Select a cleanup rule to preview which rows will be deleted for <strong>{activeSiteCanonical}</strong>:
+                  </p>
+                  
+                  {/* Rule 1 */}
+                  <div className="border border-slate-200 rounded-lg p-4 hover:border-blue-300 transition-colors">
+                    <div className="flex items-start justify-between">
+                      <div className="flex-1">
+                        <h4 className="font-medium text-slate-900 mb-1">
+                          Rule 1: Exact Duplicates (Same Serial + Same Tag)
+                        </h4>
+                        <p className="text-sm text-slate-500">
+                          Finds rows where both Serial Number AND Tag ID are identical. Keeps the oldest row, deletes the rest.
+                        </p>
+                      </div>
+                      <button
+                        onClick={() => previewCleanup(1)}
+                        className="ml-4 px-4 py-2 bg-blue-50 text-blue-600 rounded-md text-sm font-medium hover:bg-blue-100"
+                      >
+                        Preview
+                      </button>
+                    </div>
+                  </div>
+                  
+                  {/* Rule 2 */}
+                  <div className="border border-slate-200 rounded-lg p-4 hover:border-blue-300 transition-colors">
+                    <div className="flex items-start justify-between">
+                      <div className="flex-1">
+                        <h4 className="font-medium text-slate-900 mb-1">
+                          Rule 2: No-Tag Rows (Where Serial Has Tag Elsewhere)
+                        </h4>
+                        <p className="text-sm text-slate-500">
+                          Finds rows with no Tag ID, but the same Serial Number has a Tag in another row. Deletes the tagless duplicates.
+                        </p>
+                      </div>
+                      <button
+                        onClick={() => previewCleanup(2)}
+                        className="ml-4 px-4 py-2 bg-blue-50 text-blue-600 rounded-md text-sm font-medium hover:bg-blue-100"
+                      >
+                        Preview
+                      </button>
+                    </div>
+                  </div>
+                  
+                  {/* Rule 3 */}
+                  <div className="border border-slate-200 rounded-lg p-4 hover:border-blue-300 transition-colors">
+                    <div className="flex items-start justify-between">
+                      <div className="flex-1">
+                        <h4 className="font-medium text-slate-900 mb-1">
+                          Rule 3: Duplicate Serials (Never Tagged)
+                        </h4>
+                        <p className="text-sm text-slate-500">
+                          Finds duplicate Serial Numbers that have no Tag in any row. Keeps one row, deletes the rest.
+                        </p>
+                      </div>
+                      <button
+                        onClick={() => previewCleanup(3)}
+                        className="ml-4 px-4 py-2 bg-blue-50 text-blue-600 rounded-md text-sm font-medium hover:bg-blue-100"
+                      >
+                        Preview
+                      </button>
+                    </div>
+                  </div>
+                </div>
+              ) : (
+                <div className="space-y-4">
+                  <button
+                    onClick={() => setCleanupPreview(null)}
+                    className="text-sm text-blue-600 hover:text-blue-800 flex items-center gap-1"
+                  >
+                    ← Back to rules
+                  </button>
+                  
+                  <div className="bg-slate-50 rounded-lg p-4">
+                    <h4 className="font-medium text-slate-900 mb-2">
+                      Rule {cleanupPreview.rule}: {
+                        cleanupPreview.rule === 1 ? 'Exact Duplicates' :
+                        cleanupPreview.rule === 2 ? 'No-Tag Rows (Serial Has Tag Elsewhere)' :
+                        'Duplicate Serials (Never Tagged)'
+                      }
+                    </h4>
+                    
+                    {cleanupPreview.rowsToDelete.length === 0 && cleanupPreview.protectedRows.length === 0 ? (
+                      <p className="text-green-600 font-medium">✓ No duplicates found matching this rule!</p>
+                    ) : (
+                      <>
+                        {/* Protected Rows Warning */}
+                        {cleanupPreview.protectedRows.length > 0 && (
+                          <div className="mb-4 bg-amber-50 border border-amber-200 rounded-md p-3">
+                            <div className="flex items-start gap-2">
+                              <span className="text-amber-500 text-lg">📸</span>
+                              <div>
+                                <p className="text-amber-800 font-medium text-sm">
+                                  {cleanupPreview.protectedRows.length} duplicate row{cleanupPreview.protectedRows.length !== 1 ? 's' : ''} protected (have pictures)
+                                </p>
+                                <p className="text-amber-700 text-xs mt-1">
+                                  These rows have attached pictures and must be deleted manually if needed.
+                                </p>
+                              </div>
+                            </div>
+                            
+                            <div className="mt-2 max-h-32 overflow-y-auto border border-amber-200 rounded bg-white">
+                              <table className="w-full text-xs">
+                                <thead className="bg-amber-100 sticky top-0">
+                                  <tr>
+                                    <th className="px-2 py-1.5 text-left font-medium text-amber-800">Serial #</th>
+                                    <th className="px-2 py-1.5 text-left font-medium text-amber-800">Tag ID</th>
+                                    <th className="px-2 py-1.5 text-left font-medium text-amber-800">Pictures</th>
+                                  </tr>
+                                </thead>
+                                <tbody className="divide-y divide-amber-100">
+                                  {cleanupPreview.protectedRows.map(row => (
+                                    <tr key={row.id} className="hover:bg-amber-50">
+                                      <td className="px-2 py-1.5 font-mono">{row.serial_number || '-'}</td>
+                                      <td className="px-2 py-1.5 font-mono">{row.tag_id || <span className="text-slate-400">empty</span>}</td>
+                                      <td className="px-2 py-1.5">
+                                        {row.serial_pic_url && <span className="text-green-600 mr-1">📷 Serial</span>}
+                                        {row.tag_pic_url && <span className="text-blue-600">🏷️ Tag</span>}
+                                      </td>
+                                    </tr>
+                                  ))}
+                                </tbody>
+                              </table>
+                            </div>
+                          </div>
+                        )}
+                        
+                        {/* Rows to Delete */}
+                        {cleanupPreview.rowsToDelete.length > 0 ? (
+                          <>
+                            <p className="text-red-600 font-medium mb-3">
+                              Found {cleanupPreview.rowsToDelete.length} row{cleanupPreview.rowsToDelete.length !== 1 ? 's' : ''} to delete (no pictures):
+                            </p>
+                            
+                            <div className="max-h-60 overflow-y-auto border border-slate-200 rounded-md bg-white">
+                              <table className="w-full text-sm">
+                                <thead className="bg-slate-100 sticky top-0">
+                                  <tr>
+                                    <th className="px-3 py-2 text-left text-xs font-medium text-slate-600">Category</th>
+                                    <th className="px-3 py-2 text-left text-xs font-medium text-slate-600">Serial #</th>
+                                    <th className="px-3 py-2 text-left text-xs font-medium text-slate-600">Tag ID</th>
+                                    <th className="px-3 py-2 text-left text-xs font-medium text-slate-600">Product</th>
+                                  </tr>
+                                </thead>
+                                <tbody className="divide-y divide-slate-100">
+                                  {cleanupPreview.rowsToDelete.map(row => (
+                                    <tr key={row.id} className="hover:bg-red-50">
+                                      <td className="px-3 py-2 text-slate-700">{row.category || '-'}</td>
+                                      <td className="px-3 py-2 text-slate-900 font-mono text-xs">{row.serial_number || '-'}</td>
+                                      <td className="px-3 py-2 text-slate-900 font-mono text-xs">{row.tag_id || <span className="text-slate-400 italic">empty</span>}</td>
+                                      <td className="px-3 py-2 text-slate-600 text-xs">{row.product_name || '-'}</td>
+                                    </tr>
+                                  ))}
+                                </tbody>
+                              </table>
+                            </div>
+                            
+                            <div className="mt-4 flex items-center gap-3">
+                              <button
+                                onClick={executeCleanup}
+                                disabled={cleanupLoading}
+                                className="px-4 py-2 bg-red-600 text-white rounded-md text-sm font-medium hover:bg-red-700 disabled:opacity-50"
+                              >
+                                {cleanupLoading ? 'Deleting...' : `Delete ${cleanupPreview.rowsToDelete.length} Row${cleanupPreview.rowsToDelete.length !== 1 ? 's' : ''}`}
+                              </button>
+                              <span className="text-xs text-slate-500">This action cannot be undone.</span>
+                            </div>
+                          </>
+                        ) : (
+                          <p className="text-amber-600 font-medium">
+                            ⚠️ All duplicate rows have pictures attached. Please delete them manually if needed.
+                          </p>
+                        )}
+                      </>
+                    )}
+                  </div>
+                </div>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
     </main >
   );
 }

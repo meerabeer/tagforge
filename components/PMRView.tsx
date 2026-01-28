@@ -167,9 +167,9 @@ export default function PMRView() {
                 const duplicateSerials = countDuplicateValues(allSerials);
                 const duplicateTags = countDuplicateValues(allTags);
 
-                // Calculate tag pictures metrics
+                // Calculate tag pictures metrics for ALL site rows
                 // Exclude rows where tag_category is "Item dismantled", "Tag not required" variants
-                const rowsRequiringTagPic = manualRows.filter(r => {
+                const rowsRequiringTagPic = siteRows.filter(r => {
                     const tagCat = (r.tag_category || '').toLowerCase();
                     const photoCat = (r.photo_category || '').toLowerCase();
                     // Exclusions: "item dismantled", "tag not required" variants - no tag pic required
