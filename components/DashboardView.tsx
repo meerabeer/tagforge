@@ -718,6 +718,11 @@ export default function DashboardView() {
                                 <div className="text-sm text-slate-600">
                                     Tag Pictures ({aggregatedStats.totalTagPicsRequired > 0 ? Math.round((aggregatedStats.totalTagPicsAvailable / aggregatedStats.totalTagPicsRequired) * 100) : 0}%)
                                 </div>
+                                {aggregatedStats.totalTagPicsRequired - aggregatedStats.totalTagPicsAvailable > 0 && (
+                                    <div className="text-sm text-red-600 font-medium">
+                                        {aggregatedStats.totalTagPicsRequired - aggregatedStats.totalTagPicsAvailable} missing
+                                    </div>
+                                )}
                             </div>
                         </div>
 
@@ -867,9 +872,16 @@ export default function DashboardView() {
                                                     </td>
                                                     <td className="px-3 py-3 text-center">
                                                         {data.tag_pics_required > 0 ? (
-                                                            <span className={`text-xs font-medium ${data.tag_pics_available === data.tag_pics_required ? 'text-green-600' : 'text-orange-600'}`}>
-                                                                {data.tag_pics_available}/{data.tag_pics_required}
-                                                            </span>
+                                                            <div className="flex flex-col items-center">
+                                                                <span className={`text-xs font-medium ${data.tag_pics_available === data.tag_pics_required ? 'text-green-600' : 'text-orange-600'}`}>
+                                                                    {data.tag_pics_available}/{data.tag_pics_required}
+                                                                </span>
+                                                                {data.tag_pics_required - data.tag_pics_available > 0 && (
+                                                                    <span className="text-xs text-red-600">
+                                                                        {data.tag_pics_required - data.tag_pics_available} missing
+                                                                    </span>
+                                                                )}
+                                                            </div>
                                                         ) : '-'}
                                                     </td>
                                                     <td className="px-4 py-3 text-center">
@@ -1011,9 +1023,16 @@ export default function DashboardView() {
                                                     </td>
                                                     <td className="px-3 py-3 text-center">
                                                         {data.tag_pics_required > 0 ? (
-                                                            <span className={`text-xs font-medium ${data.tag_pics_available === data.tag_pics_required ? 'text-green-600' : 'text-orange-600'}`}>
-                                                                {data.tag_pics_available}/{data.tag_pics_required}
-                                                            </span>
+                                                            <div className="flex flex-col items-center">
+                                                                <span className={`text-xs font-medium ${data.tag_pics_available === data.tag_pics_required ? 'text-green-600' : 'text-orange-600'}`}>
+                                                                    {data.tag_pics_available}/{data.tag_pics_required}
+                                                                </span>
+                                                                {data.tag_pics_required - data.tag_pics_available > 0 && (
+                                                                    <span className="text-xs text-red-600">
+                                                                        {data.tag_pics_required - data.tag_pics_available} missing
+                                                                    </span>
+                                                                )}
+                                                            </div>
                                                         ) : '-'}
                                                     </td>
                                                     <td className="px-4 py-3 text-center">
@@ -1131,9 +1150,11 @@ export default function DashboardView() {
                                                             }`}>
                                                                 {site.tag_pics_available}/{site.tag_pics_required}
                                                             </span>
-                                                            <span className="text-xs text-slate-500">
-                                                                ({Math.round((site.tag_pics_available / site.tag_pics_required) * 100)}%)
-                                                            </span>
+                                                            {site.tag_pics_required - site.tag_pics_available > 0 && (
+                                                                <span className="text-xs text-red-600">
+                                                                    {site.tag_pics_required - site.tag_pics_available} missing
+                                                                </span>
+                                                            )}
                                                         </div>
                                                     ) : (
                                                         <span className="text-slate-400">-</span>

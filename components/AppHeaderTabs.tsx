@@ -11,6 +11,7 @@ const TAB_PARAMS: Record<string, string[]> = {
     '/analyst': ['site', 'serial'],
     '/pmr': ['date'],
     '/dashboard': ['startDate', 'endDate', 'city', 'fme', 'month', 'quarter'],
+    '/asset-performance': ['startDate', 'endDate', 'city', 'fme', 'month', 'quarter'],
     '/suggestions': ['status'],
 };
 
@@ -25,13 +26,15 @@ export default function AppHeaderTabs() {
 
     // Determine active tab based on path prefix
     const isDashboard = pathname?.startsWith('/dashboard');
+    const isAssetPerformance = pathname?.startsWith('/asset-performance');
     const isSuggestions = pathname?.startsWith('/suggestions');
     const isAnalyst = pathname?.startsWith('/analyst');
     const isPMR = pathname?.startsWith('/pmr');
-    const isNFO = !isAnalyst && !isPMR && !isSuggestions && !isDashboard;
+    const isNFO = !isAnalyst && !isPMR && !isSuggestions && !isDashboard && !isAssetPerformance;
 
     // Get current tab path
     const currentTabPath = isDashboard ? '/dashboard' : 
+                          isAssetPerformance ? '/asset-performance' :
                           isSuggestions ? '/suggestions' : 
                           isAnalyst ? '/analyst' : 
                           isPMR ? '/pmr' : '/nfo';
@@ -134,6 +137,15 @@ export default function AppHeaderTabs() {
                                 }`}
                         >
                             NFO Performance
+                        </Link>
+                        <Link
+                            href={buildTabUrl('/asset-performance')}
+                            className={`px-4 py-2 text-sm font-medium rounded-md transition-colors ${isAssetPerformance
+                                ? 'bg-white text-blue-700 shadow-sm'
+                                : 'text-slate-600 hover:text-slate-900 hover:bg-slate-200'
+                                }`}
+                        >
+                            Asset Performance
                         </Link>
                         <Link
                             href={buildTabUrl('/suggestions')}
