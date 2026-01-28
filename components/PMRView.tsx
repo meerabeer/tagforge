@@ -168,12 +168,18 @@ export default function PMRView() {
                 const duplicateTags = countDuplicateValues(allTags);
 
                 // Calculate tag pictures metrics
-                // Only count rows where tag_category AND photo_category are NOT "Item dismantled"
+                // Exclude rows where tag_category is "Item dismantled", "Tag not required" variants
                 const rowsRequiringTagPic = manualRows.filter(r => {
                     const tagCat = (r.tag_category || '').toLowerCase();
                     const photoCat = (r.photo_category || '').toLowerCase();
-                    // If either category is "item dismantled", no tag pic required
-                    return tagCat !== 'item dismantled' && photoCat !== 'item dismantled';
+                    // Exclusions: "item dismantled", "tag not required" variants - no tag pic required
+                    const excludedTagCategories = [
+                        'item dismantled',
+                        'tag not required & serial available',
+                        'tag not required & serial is missing',
+                        'tag not required'
+                    ];
+                    return !excludedTagCategories.includes(tagCat) && photoCat !== 'item dismantled';
                 });
                 
                 const tagPicsAvailable = rowsRequiringTagPic.filter(r => r.tag_pic_url && r.tag_pic_url.trim() !== '').length;

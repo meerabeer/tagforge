@@ -100,6 +100,10 @@ export default function DashboardView() {
     // Month/Quarter selection
     const [selectedMonth, setSelectedMonthState] = useState<string>(initialMonth);
     const [selectedQuarter, setSelectedQuarterState] = useState<string>(initialQuarter);
+    
+    // Completion percentage filter (client-side only, not in URL)
+    const [completionThreshold, setCompletionThreshold] = useState<'' | 'gte90' | '90' | '85' | '80' | '75' | '70'>('');
+    const [filterByCategory, setFilterByCategory] = useState<'' | CategoryKey | 'overall'>('');
 
     // --- URL Update Helpers ---
     const updateUrlParams = useCallback((updates: Record<string, string>) => {
@@ -389,8 +393,14 @@ export default function DashboardView() {
                 const rowsRequiringTagPic = allRows.filter(r => {
                     const tagCat = (r.tag_category || '').toLowerCase();
                     const photoCat = (r.photo_category || '').toLowerCase();
-                    // If either category is "item dismantled", no tag pic required
-                    return tagCat !== 'item dismantled' && photoCat !== 'item dismantled';
+                    // Exclusions: "item dismantled", "tag not required" variants - no tag pic required
+                    const excludedTagCategories = [
+                        'item dismantled',
+                        'tag not required & serial available',
+                        'tag not required & serial is missing',
+                        'tag not required'
+                    ];
+                    return !excludedTagCategories.includes(tagCat) && photoCat !== 'item dismantled';
                 });
                 
                 const tagPicsAvailable = rowsRequiringTagPic.filter(r => r.tag_pic_url && r.tag_pic_url.trim() !== '').length;
@@ -535,6 +545,32 @@ export default function DashboardView() {
         return 'bg-red-500';
     };
 
+    // Helper to check if an aggregated row passes the completion filter
+    const passesCompletionFilter = (
+        categories: Record<CategoryKey, CategoryStats>,
+        totalFilled: number,
+        totalRows: number
+    ): boolean => {
+        if (!filterByCategory || !completionThreshold) return true;
+        
+        let pct: number;
+        
+        if (filterByCategory === 'overall') {
+            pct = getPercentage(totalFilled, totalRows);
+        } else {
+            const stats = categories[filterByCategory as CategoryKey];
+            pct = getPercentage(stats.filled, stats.total);
+        }
+        
+        // Handle gte90 (>=90%) separately
+        if (completionThreshold === 'gte90') {
+            return pct >= 90;
+        }
+        
+        const threshold = parseInt(completionThreshold);
+        return pct <= threshold;
+    };
+
     return (
         <main className="min-h-screen bg-slate-50">
             <div className="max-w-screen-2xl mx-auto px-4 sm:px-6 py-4">
@@ -625,6 +661,57 @@ export default function DashboardView() {
                                 ))}
                             </select>
                         </div>
+
+                        {/* Separator */}
+                        <div className="h-10 w-px bg-slate-300 self-end"></div>
+
+                        {/* Completion Filter - Category Selection */}
+                        <div>
+                            <label className="block text-sm font-medium text-slate-700 mb-1">Filter Category</label>
+                            <select
+                                value={filterByCategory}
+                                onChange={(e) => setFilterByCategory(e.target.value as '' | CategoryKey | 'overall')}
+                                className="border border-slate-300 rounded-md px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-purple-500 min-w-[140px]"
+                            >
+                                <option value="">Select Category</option>
+                                <option value="overall">Overall</option>
+                                {CATEGORIES.map(cat => (
+                                    <option key={cat} value={cat}>{CATEGORY_DISPLAY_NAMES[cat]}</option>
+                                ))}
+                            </select>
+                        </div>
+
+                        {/* Completion Filter - Threshold */}
+                        <div>
+                            <label className="block text-sm font-medium text-slate-700 mb-1">Completion</label>
+                            <select
+                                value={completionThreshold}
+                                onChange={(e) => setCompletionThreshold(e.target.value as '' | 'gte90' | '90' | '85' | '80' | '75' | '70')}
+                                disabled={!filterByCategory}
+                                className="border border-slate-300 rounded-md px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-purple-500 min-w-[100px] disabled:opacity-50 disabled:cursor-not-allowed"
+                            >
+                                <option value="">All</option>
+                                <option value="gte90">≥ 90%</option>
+                                <option value="90">≤ 90%</option>
+                                <option value="85">≤ 85%</option>
+                                <option value="80">≤ 80%</option>
+                                <option value="75">≤ 75%</option>
+                                <option value="70">≤ 70%</option>
+                            </select>
+                        </div>
+
+                        {/* Clear Completion Filter */}
+                        {(completionThreshold || filterByCategory) && (
+                            <button
+                                onClick={() => { 
+                                    setCompletionThreshold('');
+                                    setFilterByCategory('');
+                                }}
+                                className="px-3 py-2 text-sm font-medium text-purple-600 bg-purple-50 hover:bg-purple-100 rounded-md transition-colors self-end"
+                            >
+                                Clear %
+                            </button>
+                        )}
 
                         {/* Clear Filters */}
                         {(selectedCity || selectedFME) && (
@@ -758,7 +845,14 @@ export default function DashboardView() {
                 {/* Area Performance Summary */}
                 {siteStats.length > 0 && (
                     <div className="bg-white border border-slate-200 rounded-lg p-6 mb-4 shadow-sm">
-                        <h3 className="text-lg font-semibold text-slate-900 mb-4">Area Performance</h3>
+                        <div className="flex items-center justify-between mb-4">
+                            <h3 className="text-lg font-semibold text-slate-900">Area Performance</h3>
+                            {filterByCategory && completionThreshold && (
+                                <span className="inline-flex items-center gap-1.5 px-3 py-1 bg-purple-100 text-purple-700 text-xs font-medium rounded-full">
+                                    Filter: {filterByCategory === 'overall' ? 'Overall' : CATEGORY_DISPLAY_NAMES[filterByCategory as CategoryKey]} {completionThreshold === 'gte90' ? '≥ 90' : `≤ ${completionThreshold}`}%
+                                </span>
+                            )}
+                        </div>
                         <div className="overflow-x-auto">
                             <table className="w-full text-sm">
                                 <thead className="bg-slate-50 border-b border-slate-200">
@@ -831,11 +925,22 @@ export default function DashboardView() {
                                         
                                         // Sort by completion percentage descending
                                         const sortedCities = Array.from(cityMap.entries())
+                                            .filter(([, data]) => passesCompletionFilter(data.categories, data.totalFilled, data.totalRows))
                                             .sort((a, b) => {
                                                 const pctA = a[1].totalRows > 0 ? a[1].totalFilled / a[1].totalRows : 0;
                                                 const pctB = b[1].totalRows > 0 ? b[1].totalFilled / b[1].totalRows : 0;
                                                 return pctB - pctA;
                                             });
+                                        
+                                        if (sortedCities.length === 0) {
+                                            return (
+                                                <tr>
+                                                    <td colSpan={12} className="px-4 py-8 text-center text-slate-500">
+                                                        No areas match the selected completion filter
+                                                    </td>
+                                                </tr>
+                                            );
+                                        }
                                         
                                         return sortedCities.map(([city, data]) => {
                                             const overallPct = getPercentage(data.totalFilled, data.totalRows);
@@ -907,7 +1012,14 @@ export default function DashboardView() {
                 {/* NFO Performance Summary */}
                 {siteStats.length > 0 && (
                     <div className="bg-white border border-slate-200 rounded-lg p-6 mb-4 shadow-sm">
-                        <h3 className="text-lg font-semibold text-slate-900 mb-4">NFO Performance</h3>
+                        <div className="flex items-center justify-between mb-4">
+                            <h3 className="text-lg font-semibold text-slate-900">NFO Performance</h3>
+                            {filterByCategory && completionThreshold && (
+                                <span className="inline-flex items-center gap-1.5 px-3 py-1 bg-purple-100 text-purple-700 text-xs font-medium rounded-full">
+                                    Filter: {filterByCategory === 'overall' ? 'Overall' : CATEGORY_DISPLAY_NAMES[filterByCategory as CategoryKey]} ≤ {completionThreshold}%
+                                </span>
+                            )}
+                        </div>
                         <div className="overflow-x-auto max-h-96">
                             <table className="w-full text-sm">
                                 <thead className="bg-slate-50 border-b border-slate-200 sticky top-0">
@@ -980,11 +1092,22 @@ export default function DashboardView() {
                                         
                                         // Sort by completion percentage descending
                                         const sortedNFOs = Array.from(nfoMap.entries())
+                                            .filter(([, data]) => passesCompletionFilter(data.categories, data.totalFilled, data.totalRows))
                                             .sort((a, b) => {
                                                 const pctA = a[1].totalRows > 0 ? a[1].totalFilled / a[1].totalRows : 0;
                                                 const pctB = b[1].totalRows > 0 ? b[1].totalFilled / b[1].totalRows : 0;
                                                 return pctB - pctA;
                                             });
+                                        
+                                        if (sortedNFOs.length === 0) {
+                                            return (
+                                                <tr>
+                                                    <td colSpan={12} className="px-4 py-8 text-center text-slate-500">
+                                                        No NFOs match the selected completion filter
+                                                    </td>
+                                                </tr>
+                                            );
+                                        }
                                         
                                         return sortedNFOs.map(([nfo, data]) => {
                                             const overallPct = getPercentage(data.totalFilled, data.totalRows);
