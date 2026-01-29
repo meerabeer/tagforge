@@ -10,8 +10,10 @@ interface PMRPlan {
     Site_ID_1: string;
     Site_ID: string;
     Planned_PMR_Date: string;
+    "Autual_PMR_Date": string;
     City: string;
-    FME_Name: string;
+    "FME Name": string;
+    Status: string;
 }
 
 interface InventoryRow {
@@ -149,22 +151,22 @@ export default function AssetPerformanceView() {
     useEffect(() => {
         const fetchFilterOptions = async () => {
             const { data: cityFmeData } = await supabase
-                .from('pmr_plan_2026_sheet1')
-                .select('City, FME_Name')
+                .from('pmr_actual_2026')
+                .select('City, "FME Name"')
                 .not('City', 'is', null)
-                .not('FME_Name', 'is', null);
+                .not('FME Name', 'is', null);
             
             if (cityFmeData) {
                 const uniqueCities = [...new Set(cityFmeData.map(r => r.City as string))].sort();
                 setCities(uniqueCities);
                 
-                const allFME = [...new Set(cityFmeData.map(r => r.FME_Name as string))].sort();
+                const allFME = [...new Set(cityFmeData.map(r => r['FME Name'] as string))].sort();
                 setFmeNames(allFME);
                 
                 const mapping = new Map<string, Set<string>>();
                 cityFmeData.forEach(row => {
                     const city = row.City as string;
-                    const fme = row.FME_Name as string;
+                    const fme = row['FME Name'] as string;
                     if (!mapping.has(city)) mapping.set(city, new Set());
                     mapping.get(city)!.add(fme);
                 });
@@ -211,6 +213,31 @@ export default function AssetPerformanceView() {
         }
     }, [selectedCity, selectedFME, cityFmeMap]);
 
+    // Parse D-Mon-YY format to Date object (e.g., "29-Jan-26" -> Date)
+    const parsePMRDate = (dateStr: string): Date | null => {
+        if (!dateStr) return null;
+        const months: Record<string, number> = {
+            'Jan': 0, 'Feb': 1, 'Mar': 2, 'Apr': 3, 'May': 4, 'Jun': 5,
+            'Jul': 6, 'Aug': 7, 'Sep': 8, 'Oct': 9, 'Nov': 10, 'Dec': 11
+        };
+        const parts = dateStr.split('-');
+        if (parts.length !== 3) return null;
+        const day = parseInt(parts[0], 10);
+        const month = months[parts[1]];
+        const year = 2000 + parseInt(parts[2], 10); // Assumes 20xx
+        if (isNaN(day) || month === undefined || isNaN(year)) return null;
+        return new Date(year, month, day);
+    };
+
+    // Check if a PMR date string falls within the selected range
+    const isDateInRange = (dateStr: string, start: string, end: string): boolean => {
+        const date = parsePMRDate(dateStr);
+        if (!date) return false;
+        const startDateObj = new Date(start);
+        const endDateObj = new Date(end);
+        return date >= startDateObj && date <= endDateObj;
+    };
+
     // Fetch asset performance data
     const fetchAssetData = useCallback(async () => {
         if (!startDate || !endDate) return;
@@ -219,21 +246,23 @@ export default function AssetPerformanceView() {
         setError(null);
 
         try {
-            // 1. Fetch PMR plans within date range with optional filters
+            // 1. Fetch ALL PMR records then filter by date range client-side
+            // (Date format in DB is D-Mon-YY which doesn't work with SQL date comparison)
             let query = supabase
-                .from('pmr_plan_2026_sheet1')
-                .select('Site_ID, Site_ID_1, Planned_PMR_Date, City, FME_Name')
-                .gte('Planned_PMR_Date', startDate)
-                .lte('Planned_PMR_Date', endDate);
+                .from('pmr_actual_2026')
+                .select('Site_ID, Site_ID_1, Planned_PMR_Date, \"Autual_PMR_Date\", City, \"FME Name\", Status');
             
             if (selectedCity) query = query.eq('City', selectedCity);
-            if (selectedFME) query = query.eq('FME_Name', selectedFME);
+            if (selectedFME) query = query.eq('FME Name', selectedFME);
             
-            const { data: plansData, error: plansError } = await query.order('Planned_PMR_Date', { ascending: true });
+            const { data: allPlansData, error: plansError } = await query;
 
-            if (plansError) throw new Error(`Failed to fetch PMR plans: ${plansError.message}`);
+            if (plansError) throw new Error(`Failed to fetch PMR records: ${plansError.message}`);
 
-            const plans = (plansData as unknown as PMRPlan[]) || [];
+            // Filter by date range client-side
+            const plans = ((allPlansData || []).filter(p => 
+                isDateInRange(p['Autual_PMR_Date'], startDate, endDate)
+            ) as unknown as PMRPlan[]);
 
             if (plans.length === 0) {
                 setAssetData([]);
@@ -251,9 +280,9 @@ export default function AssetPerformanceView() {
                 if (siteId) {
                     allSiteIds.add(siteId);
                     siteToNFOMap.set(siteId, {
-                        fme_name: p.FME_Name || '',
+                        fme_name: p['FME Name'] || '',
                         city: p.City || '',
-                        planned_date: p.Planned_PMR_Date || ''
+                        planned_date: p['Autual_PMR_Date'] || p.Planned_PMR_Date || ''
                     });
                 }
             });

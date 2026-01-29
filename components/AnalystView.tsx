@@ -116,17 +116,17 @@ export default function AnalystView() {
 
             let finalRows = (rows as InventoryRow[]) || [];
 
-            // Fetch Planned Dates for these sites
+            // Fetch Actual PMR Dates for these sites
             if (finalRows.length > 0) {
                 const siteIds = Array.from(new Set(finalRows.map(r => r.site_id)));
                 const { data: plans } = await supabase
-                    .from('pmr_plan_2026_sheet1')
-                    .select('site_id, planned_date')
-                    .in('site_id', siteIds);
+                    .from('pmr_actual_2026')
+                    .select('Site_ID_1, \"Autual_PMR_Date\"')
+                    .in('Site_ID_1', siteIds);
 
                 if (plans) {
                     const planMap = new Map();
-                    plans.forEach((p: any) => planMap.set(p.site_id, p.planned_date));
+                    plans.forEach((p: any) => planMap.set(p.Site_ID_1, p['Autual_PMR_Date']));
 
                     finalRows = finalRows.map(r => ({
                         ...r,

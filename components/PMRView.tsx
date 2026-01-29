@@ -4,14 +4,18 @@ import React, { useState, useEffect, useCallback } from 'react';
 import { useRouter, useSearchParams, usePathname } from 'next/navigation';
 import { supabase } from '@/lib/supabaseClient';
 import { getParam, setParams } from '@/lib/urlUtils';
+import PMRUploadModal from '@/components/PMRUploadModal';
 
 // --- Types ---
 interface PMRPlan {
     Site_ID_1: string; // W2470
     Site_ID: string;   // 2470
-    Planned_PMR_Date: string; // "YYYY-MM-DD"
-    FME_Name: string | null;
+    Planned_PMR_Date: string; // "1-Jan-26" format
+    "Autual_PMR_Date": string; // Actual PMR date
+    Status: string | null;
+    "FME Name": string | null;
     Site_Type: string | null;
+    City: string | null;
 }
 
 interface InventoryRow {
@@ -28,12 +32,15 @@ interface InventoryRow {
 interface PMRRow {
     site_id: string;
     planned_date: string;
-    status: 'Submitted' | 'Pending';
+    actual_date: string;
+    pmr_status: string | null; // Status from PMR table (Done, Pending, etc)
+    status: 'Submitted' | 'Pending'; // Inventory submission status
     submission_count: number;
     total_rows: number;
     last_submission_date: string | null;
     fme_name: string | null;
     site_type: string | null;
+    city: string | null;
     // Data quality metrics
     duplicate_serials: number;
     duplicate_tags: number;
@@ -55,6 +62,7 @@ export default function PMRView() {
     const [loading, setLoading] = useState(false);
     const [rows, setRows] = useState<PMRRow[]>([]);
     const [stats, setStats] = useState({ total: 0, submitted: 0, percentage: 0 });
+    const [showUploadModal, setShowUploadModal] = useState(false);
 
     // --- URL Update Helper ---
     const setSelectedDate = (value: string) => {
@@ -70,23 +78,35 @@ export default function PMRView() {
         }
     }, [searchParams]);
 
+    // Convert YYYY-MM-DD to D-Mon-YY format (e.g., "2026-01-29" -> "29-Jan-26")
+    const formatDateForQuery = (isoDate: string): string => {
+        const months = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+        const [year, month, day] = isoDate.split('-');
+        const dayNum = parseInt(day, 10); // Remove leading zero
+        const monthName = months[parseInt(month, 10) - 1];
+        const shortYear = year.slice(-2);
+        return `${dayNum}-${monthName}-${shortYear}`;
+    };
+
     const fetchData = useCallback(async () => {
         if (!selectedDate) return;
         setLoading(true);
 
         try {
-            // 1. Fetch Plans for the date
-            // Using precise column names based on user feedback (Site_ID_1, Site_ID)
-            // Assuming Planned_Date exists. If not, this query will fail.
+            // Convert date picker format to CSV format
+            const queryDate = formatDateForQuery(selectedDate);
+            
+            // 1. Fetch PMR records for the selected actual date
+            // Using pmr_actual_2026 table with Autual_PMR_Date column
             const { data: plansData, error: plansError } = await supabase
-                .from('pmr_plan_2026_sheet1')
-                .select('Site_ID, Site_ID_1, Planned_PMR_Date, FME_Name, Site_Type')
-                .eq('Planned_PMR_Date', selectedDate);
+                .from('pmr_actual_2026')
+                .select('Site_ID, Site_ID_1, Planned_PMR_Date, "Autual_PMR_Date", Status, "FME Name", Site_Type, City')
+                .eq('Autual_PMR_Date', queryDate);
 
             if (plansError) {
                 console.error('Error fetching plans:', plansError);
                 if (plansError.code === '42703') { // Undefined column
-                    alert(`Database schema mismatch. Please check column names. Expecting: "Site_ID", "Site_ID_1", "Planned_Date".\nDetails: ${plansError.message}`);
+                    alert(`Database schema mismatch. Please check column names in pmr_actual_2026.\nDetails: ${plansError.message}`);
                 }
                 setLoading(false);
                 return;
@@ -196,12 +216,15 @@ export default function PMRView() {
                 return {
                     site_id: displayId,
                     planned_date: p.Planned_PMR_Date,
+                    actual_date: p["Autual_PMR_Date"],
+                    pmr_status: p.Status || null,
                     status: isSubmitted ? 'Submitted' : 'Pending',
                     submission_count: manualRows.length,
                     total_rows: totalRows,
                     last_submission_date: isSubmitted && manualRows[0].updated_at ? manualRows[0].updated_at : null,
-                    fme_name: p.FME_Name || null,
+                    fme_name: p["FME Name"] || null,
                     site_type: p.Site_Type || null,
+                    city: p.City || null,
                     duplicate_serials: duplicateSerials,
                     duplicate_tags: duplicateTags,
                     tag_pics_available: tagPicsAvailable,
@@ -239,17 +262,28 @@ export default function PMRView() {
                 <div className="bg-white border border-slate-200 rounded-lg p-6 mb-4 shadow-sm">
                     <div className="flex flex-col md:flex-row gap-6 items-end justify-between">
                         <div>
-                            <h2 className="text-xl font-bold text-slate-800 mb-1">PMR Planner Tracking</h2>
-                            <p className="text-sm text-slate-500">Monitor NFO submissions against planned schedule</p>
+                            <h2 className="text-xl font-bold text-slate-800 mb-1">PMR Actual Tracking</h2>
+                            <p className="text-sm text-slate-500">Track real NFO work based on actual PMR dates</p>
 
-                            <div className="mt-4">
-                                <label className="block text-xs font-semibold text-slate-500 mb-1">SELECT DATE</label>
-                                <input
-                                    type="date"
-                                    value={selectedDate}
-                                    onChange={(e) => setSelectedDate(e.target.value)}
-                                    className="px-4 py-2 border border-slate-300 rounded-md text-slate-900 focus:ring-2 focus:ring-blue-500 outline-none"
-                                />
+                            <div className="mt-4 flex gap-4 items-end">
+                                <div>
+                                    <label className="block text-xs font-semibold text-slate-500 mb-1">SELECT ACTUAL DATE</label>
+                                    <input
+                                        type="date"
+                                        value={selectedDate}
+                                        onChange={(e) => setSelectedDate(e.target.value)}
+                                        className="px-4 py-2 border border-slate-300 rounded-md text-slate-900 focus:ring-2 focus:ring-blue-500 outline-none"
+                                    />
+                                </div>
+                                <button
+                                    onClick={() => setShowUploadModal(true)}
+                                    className="px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg transition-colors font-medium flex items-center gap-2"
+                                >
+                                    <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-8l-4-4m0 0L8 8m4-4v12" />
+                                    </svg>
+                                    Upload CSV
+                                </button>
                             </div>
                         </div>
 
@@ -257,7 +291,7 @@ export default function PMRView() {
                         <div className="flex gap-4 w-full md:w-auto">
                             <div className="bg-blue-50 border border-blue-100 p-4 rounded-lg flex-1 min-w-[120px] text-center">
                                 <div className="text-2xl font-bold text-blue-700">{stats.total}</div>
-                                <div className="text-xs text-blue-600 font-medium uppercase mt-1">Planned Sites</div>
+                                <div className="text-xs text-blue-600 font-medium uppercase mt-1">Sites</div>
                             </div>
                             <div className={`border p-4 rounded-lg flex-1 min-w-[120px] text-center ${stats.percentage === 100 ? 'bg-green-50 border-green-100' : 'bg-slate-50 border-slate-200'
                                 }`}>
@@ -281,11 +315,12 @@ export default function PMRView() {
                         <thead className="bg-slate-50 text-xs uppercase text-slate-500 font-semibold">
                             <tr>
                                 <th className="px-6 py-4 border-b">Site ID</th>
+                                <th className="px-6 py-4 border-b">City</th>
                                 <th className="px-6 py-4 border-b">Site Type</th>
-                                <th className="px-6 py-4 border-b">NFO Name</th>
-                                <th className="px-6 py-4 border-b">Planned Date</th>
-                                <th className="px-6 py-4 border-b text-center">Status</th>
-                                <th className="px-6 py-4 border-b text-center">Changes</th>
+                                <th className="px-6 py-4 border-b">Real NFO</th>
+                                <th className="px-6 py-4 border-b">Actual Date</th>
+                                <th className="px-6 py-4 border-b text-center">PMR Status</th>
+                                <th className="px-6 py-4 border-b text-center">Inventory</th>
                                 <th className="px-6 py-4 border-b text-center">Duplicates</th>
                                 <th className="px-6 py-4 border-b text-center">Tag Pictures</th>
                             </tr>
@@ -293,19 +328,31 @@ export default function PMRView() {
                         <tbody className="divide-y divide-slate-100 text-sm">
                             {loading ? (
                                 <tr>
-                                    <td colSpan={8} className="px-6 py-12 text-center text-slate-500">Loading plan data...</td>
+                                    <td colSpan={9} className="px-6 py-12 text-center text-slate-500">Loading plan data...</td>
                                 </tr>
                             ) : rows.length === 0 ? (
                                 <tr>
-                                    <td colSpan={8} className="px-6 py-12 text-center text-slate-500">No planned sites found for this date.</td>
+                                    <td colSpan={9} className="px-6 py-12 text-center text-slate-500">No PMR records found for this date.</td>
                                 </tr>
                             ) : (
                                 rows.map((row) => (
                                     <tr key={row.site_id} className="hover:bg-slate-50">
                                         <td className="px-6 py-3 font-medium text-slate-900">{row.site_id}</td>
+                                        <td className="px-6 py-3 text-slate-600">{row.city || '-'}</td>
                                         <td className="px-6 py-3 text-slate-600">{row.site_type || '-'}</td>
-                                        <td className="px-6 py-3 text-slate-600">{row.fme_name || '-'}</td>
-                                        <td className="px-6 py-3 text-slate-600">{row.planned_date}</td>
+                                        <td className="px-6 py-3 text-slate-600 font-medium">{row.fme_name || '-'}</td>
+                                        <td className="px-6 py-3 text-slate-600">{row.actual_date || row.planned_date}</td>
+                                        <td className="px-6 py-3 text-center">
+                                            <span className={`inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium ${
+                                                row.pmr_status === 'Done'
+                                                    ? 'bg-green-100 text-green-800'
+                                                    : row.pmr_status === 'Pending'
+                                                    ? 'bg-yellow-100 text-yellow-800'
+                                                    : 'bg-slate-100 text-slate-800'
+                                                }`}>
+                                                {row.pmr_status || '-'}
+                                            </span>
+                                        </td>
                                         <td className="px-6 py-3 text-center">
                                             <span className={`inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium ${row.status === 'Submitted'
                                                 ? 'bg-green-100 text-green-800'
@@ -313,18 +360,11 @@ export default function PMRView() {
                                                 }`}>
                                                 {row.status}
                                             </span>
-                                        </td>
-                                        <td className="px-6 py-3 text-center text-slate-600">
-                                            {row.submission_count > 0 ? (
-                                                <div className="flex flex-col items-center">
-                                                    <span className="font-semibold text-slate-900">
-                                                        {row.submission_count} / {row.total_rows}
-                                                    </span>
-                                                    <span className="text-xs text-slate-500">
-                                                        ({row.total_rows > 0 ? Math.round((row.submission_count / row.total_rows) * 100) : 0}%)
-                                                    </span>
+                                            {row.submission_count > 0 && (
+                                                <div className="text-xs text-slate-500 mt-1">
+                                                    {row.submission_count}/{row.total_rows}
                                                 </div>
-                                            ) : '-'}
+                                            )}
                                         </td>
                                         <td className="px-6 py-3 text-center">
                                             {row.submission_count > 0 ? (
@@ -365,6 +405,15 @@ export default function PMRView() {
                 </div>
 
             </div>
+
+            {/* Upload Modal */}
+            <PMRUploadModal
+                isOpen={showUploadModal}
+                onClose={() => setShowUploadModal(false)}
+                onUploadComplete={() => {
+                    fetchData();
+                }}
+            />
         </main>
     );
 }

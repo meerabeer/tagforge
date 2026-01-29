@@ -19,7 +19,15 @@ TagForge is a Next.js 16 (App Router) site inventory management system for track
 - `helper_catalog`: Product catalog for cascading dropdowns (category → equipment_type → product_name → product_number)
 - `tag_category_helper`, `photo_category_helper`: Dropdown options with sort_order
 - `site_category_requirements`: Site-specific rules (required_flag, rule_text, parse_note)
-- `pmr_plan_2026_sheet1`: PMR schedule with Site_ID, Site_ID_1 (W-prefix), Planned_PMR_Date
+- `pmr_actual_2026`: PMR actual records with Site_ID, Site_ID_1 (W-prefix), Autual_PMR_Date, FME Name (real NFO who did the work), Status
+
+### PMR CSV Upload
+The PMR data can be updated via CSV upload at `/pmr` view:
+- Upload button opens modal with preview
+- CSV must have columns: Site_ID_1, Site_ID, Autual_PMR_Date, FME Name
+- **OVERWRITES** all existing PMR records (full table replacement)
+- API route: [app/api/pmr-upload/route.ts](app/api/pmr-upload/route.ts)
+- Modal component: [components/PMRUploadModal.tsx](components/PMRUploadModal.tsx)
 
 ### Application Structure
 - **Three Main Views** (tabs): NFO ([/app/nfo](app/nfo)), PMR ([/app/pmr](app/pmr)), Analyst ([/app/analyst](app/analyst))
