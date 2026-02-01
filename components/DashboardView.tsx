@@ -244,8 +244,13 @@ export default function DashboardView() {
     const isDateInRange = (dateStr: string, start: string, end: string): boolean => {
         const date = parsePMRDate(dateStr);
         if (!date) return false;
-        const startDate = new Date(start);
-        const endDate = new Date(end);
+        // Parse start/end as local dates (YYYY-MM-DD format from date picker)
+        // new Date('YYYY-MM-DD') parses as UTC, which causes timezone issues
+        // Instead, parse manually to create local midnight
+        const [startYear, startMonth, startDay] = start.split('-').map(Number);
+        const [endYear, endMonth, endDay] = end.split('-').map(Number);
+        const startDate = new Date(startYear, startMonth - 1, startDay);
+        const endDate = new Date(endYear, endMonth - 1, endDay);
         return date >= startDate && date <= endDate;
     };
 
