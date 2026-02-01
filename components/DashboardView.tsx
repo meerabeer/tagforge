@@ -33,7 +33,7 @@ interface CategoryStats {
 
 interface SiteStats {
     site_id: string;
-    planned_date: string;
+    actual_date: string;
     city: string;
     fme_name: string;
     categories: {
@@ -446,7 +446,7 @@ export default function DashboardView() {
 
                 return {
                     site_id: displayId,
-                    planned_date: plan['Autual_PMR_Date'] || plan.Planned_PMR_Date,
+                    actual_date: plan['Autual_PMR_Date'] || plan.Planned_PMR_Date,
                     city: plan.City || '',
                     fme_name: plan['FME Name'] || '',
                     categories,
@@ -627,6 +627,86 @@ export default function DashboardView() {
     const filteredSiteStats = siteStats.filter(site => 
         passesCompletionFilter(site.categories, site.totalFilled, site.totalRows)
     );
+
+    // CSV Download function for Site Details
+    const downloadSiteDetailsCSV = () => {
+        if (filteredSiteStats.length === 0) return;
+
+        // Build CSV header
+        const headers = [
+            'Site ID',
+            'Actual Date',
+            'City',
+            'NFO',
+            ...CATEGORIES.map(cat => `${CATEGORY_DISPLAY_NAMES[cat]} Filled`),
+            ...CATEGORIES.map(cat => `${CATEGORY_DISPLAY_NAMES[cat]} Total`),
+            ...CATEGORIES.map(cat => `${CATEGORY_DISPLAY_NAMES[cat]} %`),
+            'Total Filled',
+            'Total Rows',
+            'Completion %',
+            'Duplicate Serials',
+            'Duplicate Tags',
+            'Tag Pics Available',
+            'Tag Pics Required',
+            'Tag Pics Missing'
+        ];
+
+        // Build CSV rows
+        const rows = filteredSiteStats.map(site => {
+            const overallPct = getPercentage(site.totalFilled, site.totalRows);
+            return [
+                site.site_id,
+                site.actual_date,
+                site.city,
+                site.fme_name || '',
+                ...CATEGORIES.map(cat => site.categories[cat].filled),
+                ...CATEGORIES.map(cat => site.categories[cat].total),
+                ...CATEGORIES.map(cat => getPercentage(site.categories[cat].filled, site.categories[cat].total)),
+                site.totalFilled,
+                site.totalRows,
+                overallPct,
+                site.duplicate_serials,
+                site.duplicate_tags,
+                site.tag_pics_available,
+                site.tag_pics_required,
+                site.tag_pics_required - site.tag_pics_available
+            ];
+        });
+
+        // Combine header and rows
+        const csvContent = [
+            headers.join(','),
+            ...rows.map(row => row.map(cell => {
+                // Escape cells that contain commas or quotes
+                const cellStr = String(cell);
+                if (cellStr.includes(',') || cellStr.includes('"') || cellStr.includes('\n')) {
+                    return `"${cellStr.replace(/"/g, '""')}"`;
+                }
+                return cellStr;
+            }).join(','))
+        ].join('\n');
+
+        // Create and trigger download
+        const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
+        const link = document.createElement('a');
+        const url = URL.createObjectURL(blob);
+        
+        // Generate filename with date range and filter info
+        let filename = `site_details_${startDate}_to_${endDate}`;
+        if (selectedCity) filename += `_${selectedCity}`;
+        if (selectedFME) filename += `_${selectedFME.split(' ')[0]}`;
+        if (filterByCategory && completionThreshold) {
+            filename += `_${filterByCategory}_${completionThreshold === 'gte90' ? 'gte90' : `lte${completionThreshold}`}pct`;
+        }
+        filename += '.csv';
+        
+        link.setAttribute('href', url);
+        link.setAttribute('download', filename);
+        link.style.visibility = 'hidden';
+        document.body.appendChild(link);
+        link.click();
+        document.body.removeChild(link);
+    };
 
     // Compute filtered aggregated stats when filter is active
     const displayStats = React.useMemo(() => {
@@ -1326,11 +1406,22 @@ export default function DashboardView() {
                                 <h3 className="text-lg font-semibold text-slate-900">Site Details</h3>
                                 <p className="text-sm text-slate-500">{filteredSiteStats.length} sites{filterByCategory && completionThreshold ? ' (filtered)' : ' in selected date range'}</p>
                             </div>
-                            {filterByCategory && completionThreshold && (
-                                <span className="inline-flex items-center gap-1.5 px-3 py-1 bg-purple-100 text-purple-700 text-xs font-medium rounded-full">
-                                    {filterByCategory === 'overall' ? 'Overall' : CATEGORY_DISPLAY_NAMES[filterByCategory as CategoryKey]} {completionThreshold === 'gte90' ? '≥ 90' : `≤ ${completionThreshold}`}%
-                                </span>
-                            )}
+                            <div className="flex items-center gap-3">
+                                {filterByCategory && completionThreshold && (
+                                    <span className="inline-flex items-center gap-1.5 px-3 py-1 bg-purple-100 text-purple-700 text-xs font-medium rounded-full">
+                                        {filterByCategory === 'overall' ? 'Overall' : CATEGORY_DISPLAY_NAMES[filterByCategory as CategoryKey]} {completionThreshold === 'gte90' ? '≥ 90' : `≤ ${completionThreshold}`}%
+                                    </span>
+                                )}
+                                <button
+                                    onClick={downloadSiteDetailsCSV}
+                                    className="inline-flex items-center gap-2 px-3 py-1.5 bg-green-600 text-white text-sm font-medium rounded-md hover:bg-green-700 transition-colors"
+                                >
+                                    <svg xmlns="http://www.w3.org/2000/svg" className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                                        <path strokeLinecap="round" strokeLinejoin="round" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" />
+                                    </svg>
+                                    CSV
+                                </button>
+                            </div>
                         </div>
                         
                         <div className="overflow-x-auto">
@@ -1338,7 +1429,7 @@ export default function DashboardView() {
                                 <thead className="bg-slate-50 border-b border-slate-200">
                                     <tr>
                                         <th className="text-left px-4 py-3 font-medium text-slate-700 sticky left-0 bg-slate-50">Site ID</th>
-                                        <th className="text-left px-4 py-3 font-medium text-slate-700">Planned Date</th>
+                                        <th className="text-left px-4 py-3 font-medium text-slate-700">Actual Date</th>
                                         <th className="text-left px-4 py-3 font-medium text-slate-700">City</th>
                                         <th className="text-left px-4 py-3 font-medium text-slate-700">NFO</th>
                                         {CATEGORIES.map(cat => (
@@ -1360,7 +1451,7 @@ export default function DashboardView() {
                                                 <td className="px-4 py-3 font-medium text-slate-900 sticky left-0 bg-white">
                                                     {site.site_id}
                                                 </td>
-                                                <td className="px-4 py-3 text-slate-600">{site.planned_date}</td>
+                                                <td className="px-4 py-3 text-slate-600">{site.actual_date}</td>
                                                 <td className="px-4 py-3 text-slate-600">{site.city}</td>
                                                 <td className="px-4 py-3 text-slate-600 max-w-[150px] truncate" title={site.fme_name}>
                                                     {site.fme_name ? site.fme_name.split(' ').slice(0, 2).join(' ') : '-'}
