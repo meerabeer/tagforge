@@ -104,7 +104,7 @@ export default function DashboardView() {
     const [selectedQuarter, setSelectedQuarterState] = useState<string>(initialQuarter);
     
     // Completion percentage filter (client-side only, not in URL)
-    const [completionThreshold, setCompletionThreshold] = useState<'' | 'gte90' | '90' | '85' | '80' | '75' | '70'>('');
+    const [completionThreshold, setCompletionThreshold] = useState<'' | 'gte90' | '90' | '85' | '80' | '75' | '70' | '10'>('');
     const [filterByCategory, setFilterByCategory] = useState<'' | CategoryKey | 'overall'>('');
 
     // --- URL Update Helpers ---
@@ -157,6 +157,8 @@ export default function DashboardView() {
     // Aggregated stats
     const [aggregatedStats, setAggregatedStats] = useState<{
         totalSites: number;
+        submittedSites: number;  // Sites with completion > 10%
+        pendingSites: number;    // Sites with completion <= 10%
         totalRows: number;
         totalFilled: number;
         byCategory: Record<CategoryKey, CategoryStats>;
@@ -475,6 +477,8 @@ export default function DashboardView() {
             let aggDuplicateTags = 0;
             let aggTagPicsAvailable = 0;
             let aggTagPicsRequired = 0;
+            let submittedSites = 0;  // Sites with completion > 10%
+            let pendingSites = 0;    // Sites with completion <= 10%
 
             results.forEach(site => {
                 CATEGORIES.forEach(cat => {
@@ -487,10 +491,22 @@ export default function DashboardView() {
                 aggDuplicateTags += site.duplicate_tags;
                 aggTagPicsAvailable += site.tag_pics_available;
                 aggTagPicsRequired += site.tag_pics_required;
+                
+                // Calculate site completion percentage for submitted/pending classification
+                const siteCompletionPct = site.totalRows > 0 
+                    ? (site.totalFilled / site.totalRows) * 100 
+                    : 0;
+                if (siteCompletionPct > 10) {
+                    submittedSites++;
+                } else {
+                    pendingSites++;
+                }
             });
 
             setAggregatedStats({
                 totalSites: results.length,
+                submittedSites,
+                pendingSites,
                 totalRows: aggTotalRows,
                 totalFilled: aggTotalFilled,
                 byCategory: aggByCategory,
@@ -607,6 +623,75 @@ export default function DashboardView() {
         return pct <= threshold;
     };
 
+    // Filter siteStats based on completion filter
+    const filteredSiteStats = siteStats.filter(site => 
+        passesCompletionFilter(site.categories, site.totalFilled, site.totalRows)
+    );
+
+    // Compute filtered aggregated stats when filter is active
+    const displayStats = React.useMemo(() => {
+        if (!aggregatedStats) return null;
+        
+        // If no filter active, return original stats
+        if (!filterByCategory || !completionThreshold) {
+            return aggregatedStats;
+        }
+
+        // Recalculate stats based on filtered sites
+        const aggByCategory: Record<CategoryKey, CategoryStats> = {
+            'Enclosure-Active': { total: 0, filled: 0 },
+            'Enclosure-Passive': { total: 0, filled: 0 },
+            'RAN-Active': { total: 0, filled: 0 },
+            'RAN-Passive': { total: 0, filled: 0 },
+            'MW-Active': { total: 0, filled: 0 },
+            'MW-Passive': { total: 0, filled: 0 },
+        };
+
+        let aggTotalRows = 0;
+        let aggTotalFilled = 0;
+        let aggDuplicateSerials = 0;
+        let aggDuplicateTags = 0;
+        let aggTagPicsAvailable = 0;
+        let aggTagPicsRequired = 0;
+        let submittedSites = 0;
+        let pendingSites = 0;
+
+        filteredSiteStats.forEach(site => {
+            CATEGORIES.forEach(cat => {
+                aggByCategory[cat].total += site.categories[cat].total;
+                aggByCategory[cat].filled += site.categories[cat].filled;
+            });
+            aggTotalRows += site.totalRows;
+            aggTotalFilled += site.totalFilled;
+            aggDuplicateSerials += site.duplicate_serials;
+            aggDuplicateTags += site.duplicate_tags;
+            aggTagPicsAvailable += site.tag_pics_available;
+            aggTagPicsRequired += site.tag_pics_required;
+            
+            const siteCompletionPct = site.totalRows > 0 
+                ? (site.totalFilled / site.totalRows) * 100 
+                : 0;
+            if (siteCompletionPct > 10) {
+                submittedSites++;
+            } else {
+                pendingSites++;
+            }
+        });
+
+        return {
+            totalSites: filteredSiteStats.length,
+            submittedSites,
+            pendingSites,
+            totalRows: aggTotalRows,
+            totalFilled: aggTotalFilled,
+            byCategory: aggByCategory,
+            totalDuplicateSerials: aggDuplicateSerials,
+            totalDuplicateTags: aggDuplicateTags,
+            totalTagPicsAvailable: aggTagPicsAvailable,
+            totalTagPicsRequired: aggTagPicsRequired,
+        };
+    }, [aggregatedStats, filteredSiteStats, filterByCategory, completionThreshold]);
+
     return (
         <main className="min-h-screen bg-slate-50">
             <div className="max-w-screen-2xl mx-auto px-4 sm:px-6 py-4">
@@ -722,7 +807,7 @@ export default function DashboardView() {
                             <label className="block text-sm font-medium text-slate-700 mb-1">Completion</label>
                             <select
                                 value={completionThreshold}
-                                onChange={(e) => setCompletionThreshold(e.target.value as '' | 'gte90' | '90' | '85' | '80' | '75' | '70')}
+                                onChange={(e) => setCompletionThreshold(e.target.value as '' | 'gte90' | '90' | '85' | '80' | '75' | '70' | '10')}
                                 disabled={!filterByCategory}
                                 className="border border-slate-300 rounded-md px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-purple-500 min-w-[100px] disabled:opacity-50 disabled:cursor-not-allowed"
                             >
@@ -733,6 +818,7 @@ export default function DashboardView() {
                                 <option value="80">≤ 80%</option>
                                 <option value="75">≤ 75%</option>
                                 <option value="70">≤ 70%</option>
+                                <option value="10">≤ 10%</option>
                             </select>
                         </div>
 
@@ -799,51 +885,69 @@ export default function DashboardView() {
                 </div>
 
                 {/* Aggregated Stats */}
-                {aggregatedStats && (
+                {displayStats && (
                     <div className="bg-white border border-slate-200 rounded-lg p-6 mb-4 shadow-sm">
-                        <h3 className="text-lg font-semibold text-slate-900 mb-4">Overall Summary</h3>
+                        <div className="flex items-center justify-between mb-4">
+                            <h3 className="text-lg font-semibold text-slate-900">Overall Summary</h3>
+                            {filterByCategory && completionThreshold && (
+                                <span className="inline-flex items-center gap-1.5 px-3 py-1 bg-purple-100 text-purple-700 text-xs font-medium rounded-full">
+                                    Filtered: {filterByCategory === 'overall' ? 'Overall' : CATEGORY_DISPLAY_NAMES[filterByCategory as CategoryKey]} {completionThreshold === 'gte90' ? '≥ 90' : `≤ ${completionThreshold}`}%
+                                </span>
+                            )}
+                        </div>
                         
                         {/* Top Level Stats */}
-                        <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-4 mb-6">
+                        <div className="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-7 gap-4 mb-6">
                             <div className="bg-slate-50 rounded-lg p-4">
-                                <div className="text-2xl font-bold text-slate-900">{aggregatedStats.totalSites}</div>
+                                <div className="text-2xl font-bold text-slate-900">{displayStats.totalSites}</div>
                                 <div className="text-sm text-slate-600">Total Sites</div>
                             </div>
                             <div className="bg-slate-50 rounded-lg p-4">
-                                <div className="text-2xl font-bold text-slate-900">{aggregatedStats.totalRows}</div>
+                                <div className="flex flex-col gap-1">
+                                    <div className="text-lg font-bold text-green-600">
+                                        S: {displayStats.submittedSites}
+                                    </div>
+                                    <div className="text-lg font-bold text-orange-600">
+                                        P: {displayStats.pendingSites}
+                                    </div>
+                                </div>
+                                <div className="text-sm text-slate-600">Submitted / Pending</div>
+                            </div>
+                            <div className="bg-slate-50 rounded-lg p-4">
+                                <div className="text-2xl font-bold text-slate-900">{displayStats.totalRows}</div>
                                 <div className="text-sm text-slate-600">Total Rows</div>
                             </div>
                             <div className="bg-slate-50 rounded-lg p-4">
-                                <div className="text-2xl font-bold text-green-600">{aggregatedStats.totalFilled}</div>
+                                <div className="text-2xl font-bold text-green-600">{displayStats.totalFilled}</div>
                                 <div className="text-sm text-slate-600">Completed Rows</div>
                             </div>
                             <div className="bg-slate-50 rounded-lg p-4">
                                 <div className="text-2xl font-bold text-blue-600">
-                                    {getPercentage(aggregatedStats.totalFilled, aggregatedStats.totalRows)}%
+                                    {getPercentage(displayStats.totalFilled, displayStats.totalRows)}%
                                 </div>
                                 <div className="text-sm text-slate-600">Overall Completion</div>
                             </div>
-                            <div className={`rounded-lg p-4 ${aggregatedStats.totalDuplicateSerials + aggregatedStats.totalDuplicateTags > 0 ? 'bg-red-50' : 'bg-green-50'}`}>
+                            <div className={`rounded-lg p-4 ${displayStats.totalDuplicateSerials + displayStats.totalDuplicateTags > 0 ? 'bg-red-50' : 'bg-green-50'}`}>
                                 <div className="flex flex-col gap-1">
-                                    <div className={`text-lg font-bold ${aggregatedStats.totalDuplicateSerials > 0 ? 'text-red-600' : 'text-green-600'}`}>
-                                        S: {aggregatedStats.totalDuplicateSerials > 0 ? aggregatedStats.totalDuplicateSerials : '✓'}
+                                    <div className={`text-lg font-bold ${displayStats.totalDuplicateSerials > 0 ? 'text-red-600' : 'text-green-600'}`}>
+                                        S: {displayStats.totalDuplicateSerials > 0 ? displayStats.totalDuplicateSerials : '✓'}
                                     </div>
-                                    <div className={`text-lg font-bold ${aggregatedStats.totalDuplicateTags > 0 ? 'text-red-600' : 'text-green-600'}`}>
-                                        T: {aggregatedStats.totalDuplicateTags > 0 ? aggregatedStats.totalDuplicateTags : '✓'}
+                                    <div className={`text-lg font-bold ${displayStats.totalDuplicateTags > 0 ? 'text-red-600' : 'text-green-600'}`}>
+                                        T: {displayStats.totalDuplicateTags > 0 ? displayStats.totalDuplicateTags : '✓'}
                                     </div>
                                 </div>
                                 <div className="text-sm text-slate-600">Duplicates</div>
                             </div>
-                            <div className={`rounded-lg p-4 ${aggregatedStats.totalTagPicsAvailable === aggregatedStats.totalTagPicsRequired ? 'bg-green-50' : 'bg-orange-50'}`}>
-                                <div className={`text-2xl font-bold ${aggregatedStats.totalTagPicsAvailable === aggregatedStats.totalTagPicsRequired ? 'text-green-600' : 'text-orange-600'}`}>
-                                    {aggregatedStats.totalTagPicsAvailable}/{aggregatedStats.totalTagPicsRequired}
+                            <div className={`rounded-lg p-4 ${displayStats.totalTagPicsAvailable === displayStats.totalTagPicsRequired ? 'bg-green-50' : 'bg-orange-50'}`}>
+                                <div className={`text-2xl font-bold ${displayStats.totalTagPicsAvailable === displayStats.totalTagPicsRequired ? 'text-green-600' : 'text-orange-600'}`}>
+                                    {displayStats.totalTagPicsAvailable}/{displayStats.totalTagPicsRequired}
                                 </div>
                                 <div className="text-sm text-slate-600">
-                                    Tag Pictures ({aggregatedStats.totalTagPicsRequired > 0 ? Math.round((aggregatedStats.totalTagPicsAvailable / aggregatedStats.totalTagPicsRequired) * 100) : 0}%)
+                                    Tag Pictures ({displayStats.totalTagPicsRequired > 0 ? Math.round((displayStats.totalTagPicsAvailable / displayStats.totalTagPicsRequired) * 100) : 0}%)
                                 </div>
-                                {aggregatedStats.totalTagPicsRequired - aggregatedStats.totalTagPicsAvailable > 0 && (
+                                {displayStats.totalTagPicsRequired - displayStats.totalTagPicsAvailable > 0 && (
                                     <div className="text-sm text-red-600 font-medium">
-                                        {aggregatedStats.totalTagPicsRequired - aggregatedStats.totalTagPicsAvailable} missing
+                                        {displayStats.totalTagPicsRequired - displayStats.totalTagPicsAvailable} missing
                                     </div>
                                 )}
                             </div>
@@ -853,7 +957,7 @@ export default function DashboardView() {
                         <h4 className="text-md font-medium text-slate-800 mb-3">By Category</h4>
                         <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-4">
                             {CATEGORIES.map(cat => {
-                                const stats = aggregatedStats.byCategory[cat];
+                                const stats = displayStats.byCategory[cat];
                                 const pct = getPercentage(stats.filled, stats.total);
                                 return (
                                     <div key={cat} className="bg-slate-50 rounded-lg p-4">
@@ -922,7 +1026,8 @@ export default function DashboardView() {
                                             tag_pics_required: number;
                                         }>();
                                         
-                                        siteStats.forEach(site => {
+                                        // Use filteredSiteStats to aggregate only sites that pass the filter
+                                        filteredSiteStats.forEach(site => {
                                             const city = site.city || 'Unknown';
                                             if (!cityMap.has(city)) {
                                                 cityMap.set(city, {
@@ -961,7 +1066,6 @@ export default function DashboardView() {
                                         
                                         // Sort by completion percentage descending
                                         const sortedCities = Array.from(cityMap.entries())
-                                            .filter(([, data]) => passesCompletionFilter(data.categories, data.totalFilled, data.totalRows))
                                             .sort((a, b) => {
                                                 const pctA = a[1].totalRows > 0 ? a[1].totalFilled / a[1].totalRows : 0;
                                                 const pctB = b[1].totalRows > 0 ? b[1].totalFilled / b[1].totalRows : 0;
@@ -1089,7 +1193,8 @@ export default function DashboardView() {
                                             tag_pics_required: number;
                                         }>();
                                         
-                                        siteStats.forEach(site => {
+                                        // Use filteredSiteStats to aggregate only sites that pass the filter
+                                        filteredSiteStats.forEach(site => {
                                             const nfo = site.fme_name || 'Unknown';
                                             if (!nfoMap.has(nfo)) {
                                                 nfoMap.set(nfo, {
@@ -1128,7 +1233,6 @@ export default function DashboardView() {
                                         
                                         // Sort by completion percentage descending
                                         const sortedNFOs = Array.from(nfoMap.entries())
-                                            .filter(([, data]) => passesCompletionFilter(data.categories, data.totalFilled, data.totalRows))
                                             .sort((a, b) => {
                                                 const pctA = a[1].totalRows > 0 ? a[1].totalFilled / a[1].totalRows : 0;
                                                 const pctB = b[1].totalRows > 0 ? b[1].totalFilled / b[1].totalRows : 0;
@@ -1215,11 +1319,18 @@ export default function DashboardView() {
                 )}
 
                 {/* Per-Site Table */}
-                {siteStats.length > 0 && (
+                {filteredSiteStats.length > 0 && (
                     <div className="bg-white border border-slate-200 rounded-lg shadow-sm overflow-hidden">
-                        <div className="p-4 border-b border-slate-200">
-                            <h3 className="text-lg font-semibold text-slate-900">Site Details</h3>
-                            <p className="text-sm text-slate-500">{siteStats.length} sites in selected date range</p>
+                        <div className="p-4 border-b border-slate-200 flex items-center justify-between">
+                            <div>
+                                <h3 className="text-lg font-semibold text-slate-900">Site Details</h3>
+                                <p className="text-sm text-slate-500">{filteredSiteStats.length} sites{filterByCategory && completionThreshold ? ' (filtered)' : ' in selected date range'}</p>
+                            </div>
+                            {filterByCategory && completionThreshold && (
+                                <span className="inline-flex items-center gap-1.5 px-3 py-1 bg-purple-100 text-purple-700 text-xs font-medium rounded-full">
+                                    {filterByCategory === 'overall' ? 'Overall' : CATEGORY_DISPLAY_NAMES[filterByCategory as CategoryKey]} {completionThreshold === 'gte90' ? '≥ 90' : `≤ ${completionThreshold}`}%
+                                </span>
+                            )}
                         </div>
                         
                         <div className="overflow-x-auto">
@@ -1242,7 +1353,7 @@ export default function DashboardView() {
                                     </tr>
                                 </thead>
                                 <tbody className="divide-y divide-slate-100">
-                                    {siteStats.map((site, idx) => {
+                                    {filteredSiteStats.map((site, idx) => {
                                         const overallPct = getPercentage(site.totalFilled, site.totalRows);
                                         return (
                                             <tr key={`${site.site_id}-${idx}`} className="hover:bg-slate-50">
