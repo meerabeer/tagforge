@@ -13,6 +13,7 @@ const TAB_PARAMS: Record<string, string[]> = {
     '/dashboard': ['startDate', 'endDate', 'city', 'fme', 'month', 'quarter'],
     '/asset-performance': ['startDate', 'endDate', 'city', 'fme', 'month', 'quarter'],
     '/suggestions': ['status'],
+    '/trending': ['startDate', 'endDate', 'city', 'nfo'],
 };
 
 // Storage keys for preserving params per tab
@@ -28,14 +29,16 @@ export default function AppHeaderTabs() {
     const isDashboard = pathname?.startsWith('/dashboard');
     const isAssetPerformance = pathname?.startsWith('/asset-performance');
     const isSuggestions = pathname?.startsWith('/suggestions');
+    const isTrending = pathname?.startsWith('/trending');
     const isAnalyst = pathname?.startsWith('/analyst');
     const isPMR = pathname?.startsWith('/pmr');
-    const isNFO = !isAnalyst && !isPMR && !isSuggestions && !isDashboard && !isAssetPerformance;
+    const isNFO = !isAnalyst && !isPMR && !isSuggestions && !isDashboard && !isAssetPerformance && !isTrending;
 
     // Get current tab path
     const currentTabPath = isDashboard ? '/dashboard' : 
                           isAssetPerformance ? '/asset-performance' :
-                          isSuggestions ? '/suggestions' : 
+                          isSuggestions ? '/suggestions' :
+                          isTrending ? '/trending' : 
                           isAnalyst ? '/analyst' : 
                           isPMR ? '/pmr' : '/nfo';
 
@@ -137,6 +140,15 @@ export default function AppHeaderTabs() {
                                 }`}
                         >
                             NFO Performance
+                        </Link>
+                        <Link
+                            href={buildTabUrl('/trending')}
+                            className={`px-4 py-2 text-sm font-medium rounded-md transition-colors ${isTrending
+                                ? 'bg-white text-blue-700 shadow-sm'
+                                : 'text-slate-600 hover:text-slate-900 hover:bg-slate-200'
+                                }`}
+                        >
+                            Trending
                         </Link>
                         <Link
                             href={buildTabUrl('/asset-performance')}
