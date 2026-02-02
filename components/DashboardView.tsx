@@ -208,6 +208,145 @@ export default function DashboardView() {
         };
         fetchFilterOptions();
     }, []);
+
+    // GPS compliance data from fo_database (loaded once)
+    const [foTechData, setFoTechData] = useState<Map<string, { region: string; technologies: Set<string> }>>(new Map());
+    const [gpsEntrySites, setGpsEntrySites] = useState<Set<string>>(new Set());
+
+    // Helper to normalize site_id: strip leading zeros after W
+    // W0001 -> W1, W2048 -> W2048
+    const normalizeSiteId = (siteId: string): string => {
+        if (!siteId) return '';
+        const match = siteId.match(/^W0*(\d+)$/i);
+        return match ? `W${match[1]}` : siteId;
+    };
+
+    // Fetch FO tech data and GPS entries once on mount
+    useEffect(() => {
+        const fetchGpsBaseData = async () => {
+            try {
+                // Get ALL sites with 4G-TDD or 5G technology using pagination
+                let allTddSites: { site_id: string; region: string; technology: string }[] = [];
+                let offset = 0;
+                const batchSize = 1000;
+                
+                while (true) {
+                    const { data: batch, error } = await supabase
+                        .from('fo_database_and_technology_updates')
+                        .select('site_id, region, technology')
+                        .in('technology', ['4G-TDD', '5G'])
+                        .range(offset, offset + batchSize - 1);
+                    
+                    if (error) {
+                        console.error('[GPS] Fetch error:', error);
+                        break;
+                    }
+                    if (!batch || batch.length === 0) break;
+                    
+                    allTddSites = allTddSites.concat(batch);
+                    console.log('[GPS] Fetched batch', offset, 'to', offset + batch.length, 'total:', allTddSites.length);
+                    
+                    if (batch.length < batchSize) break; // Last batch
+                    offset += batchSize;
+                }
+
+                // Group sites by normalized site_id and combine technologies
+                const siteDataMap = new Map<string, { region: string; technologies: Set<string> }>();
+                allTddSites.forEach(s => {
+                    const normalizedId = normalizeSiteId(s.site_id);
+                    if (!siteDataMap.has(normalizedId)) {
+                        siteDataMap.set(normalizedId, { region: s.region || '', technologies: new Set() });
+                    }
+                    siteDataMap.get(normalizedId)!.technologies.add(s.technology);
+                });
+                console.log('[GPS] Loaded foTechData with', siteDataMap.size, 'unique sites from', allTddSites.length, 'rows');
+                console.log('[GPS] Sample foTechData keys:', [...siteDataMap.keys()].slice(0, 10));
+                setFoTechData(siteDataMap);
+
+                // Get sites that have RAN-Passive GPS System entries (normalize IDs)
+                // Use range to avoid default 1000 row limit
+                const { data: gpsEntries } = await supabase
+                    .from('main_inventory')
+                    .select('site_id')
+                    .eq('category', 'RAN-Passive')
+                    .eq('equipment_type', 'GPS System')
+                    .range(0, 10000);
+
+                // Normalize GPS site IDs for matching
+                setGpsEntrySites(new Set(gpsEntries?.map(g => normalizeSiteId(g.site_id)) || []));
+            } catch (err) {
+                console.error('Failed to fetch GPS base data:', err);
+            }
+        };
+        fetchGpsBaseData();
+    }, []);
+
+    // Compute GPS compliance stats based on filtered sites (from siteStats)
+    const gpsComplianceStats = React.useMemo(() => {
+        if (foTechData.size === 0 || siteStats.length === 0) return null;
+
+        // Get normalized site IDs from the current dashboard view (filtered by date range)
+        const dashboardSiteIds = new Set(siteStats.map(s => normalizeSiteId(s.site_id)));
+        
+        // Debug: log sample site IDs to check format
+        console.log('[GPS Debug] Sample siteStats site_ids:', siteStats.slice(0, 5).map(s => s.site_id));
+        console.log('[GPS Debug] Sample normalized dashboard IDs:', [...dashboardSiteIds].slice(0, 5));
+        console.log('[GPS Debug] Sample foTechData keys:', [...foTechData.keys()].slice(0, 5));
+        console.log('[GPS Debug] foTechData size:', foTechData.size, 'dashboardSiteIds size:', dashboardSiteIds.size);
+        
+        // Check for intersection manually
+        let matchCount = 0;
+        const sampleMatches: string[] = [];
+        dashboardSiteIds.forEach(id => {
+            if (foTechData.has(id)) {
+                matchCount++;
+                if (sampleMatches.length < 5) sampleMatches.push(id);
+            }
+        });
+        console.log('[GPS Debug] Matches found by iterating dashboardSiteIds:', matchCount, 'samples:', sampleMatches);
+
+        // Filter to sites that have 4G-TDD/5G AND are in current dashboard view
+        const sitesNeedingGps: string[] = [];
+        dashboardSiteIds.forEach(siteId => {
+            if (foTechData.has(siteId)) {
+                sitesNeedingGps.push(siteId);
+            }
+        });
+        
+        console.log('[GPS Debug] sitesNeedingGps count:', sitesNeedingGps.length);
+
+        // Calculate stats
+        const missingGpsSites: { site_id: string; has_pmr_done: boolean; region: string; technology: string }[] = [];
+        let sitesWithGpsCount = 0;
+
+        sitesNeedingGps.forEach(siteId => {
+            const hasGps = gpsEntrySites.has(siteId);
+            if (hasGps) {
+                sitesWithGpsCount++;
+            } else {
+                const siteData = foTechData.get(siteId)!;
+                const techArray = [...siteData.technologies].sort();
+                const combinedTech = techArray.join('-');
+                missingGpsSites.push({
+                    site_id: siteId,
+                    has_pmr_done: true, // All sites in siteStats have PMR done in selected range
+                    region: siteData.region,
+                    technology: combinedTech
+                });
+            }
+        });
+
+        // Sort by site_id
+        missingGpsSites.sort((a, b) => a.site_id.localeCompare(b.site_id));
+
+        return {
+            totalSites4GTdd5G: sitesNeedingGps.length,
+            sitesWithGps: sitesWithGpsCount,
+            sitesMissingGps: missingGpsSites.length,
+            pmrDoneButMissingGps: missingGpsSites.length, // All are PMR done since they're from siteStats
+            missingGpsSitesList: missingGpsSites
+        };
+    }, [foTechData, gpsEntrySites, siteStats]);
     
     // Get filtered NFO list based on selected city
     const filteredFmeNames = selectedCity 
@@ -982,7 +1121,7 @@ export default function DashboardView() {
                         </div>
                         
                         {/* Top Level Stats */}
-                        <div className="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-7 gap-4 mb-6">
+                        <div className="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-8 gap-4 mb-6">
                             <div className="bg-slate-50 rounded-lg p-4">
                                 <div className="text-2xl font-bold text-slate-900">{displayStats.totalSites}</div>
                                 <div className="text-sm text-slate-600">Total Sites</div>
@@ -1036,6 +1175,22 @@ export default function DashboardView() {
                                     </div>
                                 )}
                             </div>
+                            {/* GPS System Card */}
+                            {gpsComplianceStats && (
+                                <div className={`rounded-lg p-4 ${gpsComplianceStats.sitesMissingGps === 0 ? 'bg-green-50' : 'bg-orange-50'}`}>
+                                    <div className={`text-2xl font-bold ${gpsComplianceStats.sitesMissingGps === 0 ? 'text-green-600' : 'text-orange-600'}`}>
+                                        {gpsComplianceStats.sitesWithGps}/{gpsComplianceStats.totalSites4GTdd5G}
+                                    </div>
+                                    <div className="text-sm text-slate-600">
+                                        GPS SYS ({gpsComplianceStats.totalSites4GTdd5G > 0 ? Math.round((gpsComplianceStats.sitesWithGps / gpsComplianceStats.totalSites4GTdd5G) * 100) : 0}%)
+                                    </div>
+                                    {gpsComplianceStats.sitesMissingGps > 0 && (
+                                        <div className="text-sm text-red-600 font-medium">
+                                            {gpsComplianceStats.sitesMissingGps} missing
+                                        </div>
+                                    )}
+                                </div>
+                            )}
                         </div>
 
                         {/* Category Breakdown */}
@@ -1067,6 +1222,129 @@ export default function DashboardView() {
                     </div>
                 )}
 
+                {/* GPS Compliance Widget - RAN-Passive GPS System */}
+                {gpsComplianceStats && gpsComplianceStats.totalSites4GTdd5G > 0 && (
+                    <div className="bg-white border border-slate-200 rounded-lg p-6 mb-4 shadow-sm">
+                        <div className="flex items-center justify-between mb-4">
+                            <div>
+                                <h3 className="text-lg font-semibold text-slate-900">RAN-Passive GPS System Compliance</h3>
+                                <p className="text-sm text-slate-500 mt-1">
+                                    Sites with 4G-TDD / 5G in selected date range ({startDate} to {endDate})
+                                </p>
+                            </div>
+                        </div>
+                        
+                        {/* GPS Stats Cards */}
+                        <div className="grid grid-cols-3 gap-4 mb-4">
+                            <div className="bg-blue-50 rounded-lg p-4">
+                                <div className="text-2xl font-bold text-blue-700">{gpsComplianceStats.totalSites4GTdd5G}</div>
+                                <div className="text-sm text-blue-600">Sites with 4G-TDD / 5G</div>
+                            </div>
+                            <div className="bg-green-50 rounded-lg p-4">
+                                <div className="text-2xl font-bold text-green-700">{gpsComplianceStats.sitesWithGps}</div>
+                                <div className="text-sm text-green-600">GPS Entries Found</div>
+                                <div className="text-xs text-green-500 mt-1">
+                                    {gpsComplianceStats.totalSites4GTdd5G > 0 
+                                        ? Math.round((gpsComplianceStats.sitesWithGps / gpsComplianceStats.totalSites4GTdd5G) * 100) 
+                                        : 0}% compliant
+                                </div>
+                            </div>
+                            <div className={`rounded-lg p-4 ${gpsComplianceStats.sitesMissingGps > 0 ? 'bg-red-50' : 'bg-green-50'}`}>
+                                <div className={`text-2xl font-bold ${gpsComplianceStats.sitesMissingGps > 0 ? 'text-red-700' : 'text-green-700'}`}>
+                                    {gpsComplianceStats.sitesMissingGps}
+                                </div>
+                                <div className={`text-sm ${gpsComplianceStats.sitesMissingGps > 0 ? 'text-red-600' : 'text-green-600'}`}>
+                                    Missing GPS Entry
+                                </div>
+                                <div className={`text-xs mt-1 ${gpsComplianceStats.sitesMissingGps > 0 ? 'text-red-500' : 'text-green-500'}`}>
+                                    {gpsComplianceStats.totalSites4GTdd5G > 0 
+                                        ? Math.round((gpsComplianceStats.sitesMissingGps / gpsComplianceStats.totalSites4GTdd5G) * 100) 
+                                        : 0}% missing
+                                </div>
+                            </div>
+                        </div>
+
+                        {/* Progress Bar */}
+                        <div className="mb-4">
+                            <div className="flex justify-between text-sm mb-1">
+                                <span className="text-slate-600">GPS Compliance Progress</span>
+                                <span className="font-medium text-slate-700">
+                                    {gpsComplianceStats.sitesWithGps} / {gpsComplianceStats.totalSites4GTdd5G}
+                                </span>
+                            </div>
+                            <div className="w-full h-3 bg-slate-200 rounded-full overflow-hidden">
+                                <div
+                                    className="h-full bg-green-500 transition-all"
+                                    style={{ 
+                                        width: `${gpsComplianceStats.totalSites4GTdd5G > 0 
+                                            ? (gpsComplianceStats.sitesWithGps / gpsComplianceStats.totalSites4GTdd5G) * 100 
+                                            : 0}%` 
+                                    }}
+                                />
+                            </div>
+                        </div>
+
+                        {/* Missing Sites List (collapsible) */}
+                        {gpsComplianceStats.sitesMissingGps > 0 && (
+                            <details className="group">
+                                <summary className="cursor-pointer text-sm font-medium text-slate-700 hover:text-slate-900 flex items-center gap-2">
+                                    <span className="group-open:rotate-90 transition-transform">▶</span>
+                                    View Sites Missing GPS Entry ({gpsComplianceStats.sitesMissingGps} sites)
+                                </summary>
+                                <div className="mt-3 max-h-64 overflow-y-auto border border-slate-200 rounded-lg">
+                                    <table className="w-full text-sm">
+                                        <thead className="bg-slate-50 sticky top-0">
+                                            <tr>
+                                                <th className="text-left px-4 py-2 text-slate-600">#</th>
+                                                <th className="text-left px-4 py-2 text-slate-600">Site ID</th>
+                                                <th className="text-left px-4 py-2 text-slate-600">Technology</th>
+                                                <th className="text-left px-4 py-2 text-slate-600">Region</th>
+                                                <th className="text-center px-4 py-2 text-slate-600">PMR Status</th>
+                                            </tr>
+                                        </thead>
+                                        <tbody className="divide-y divide-slate-100">
+                                            {gpsComplianceStats.missingGpsSitesList.slice(0, 100).map((site, idx) => (
+                                                <tr key={site.site_id} className={site.has_pmr_done ? 'bg-orange-50' : ''}>
+                                                    <td className="px-4 py-2 text-slate-500">{idx + 1}</td>
+                                                    <td className="px-4 py-2 font-medium text-slate-900">{site.site_id}</td>
+                                                    <td className="px-4 py-2">
+                                                        <span className={`inline-flex items-center px-2 py-0.5 rounded text-xs font-medium ${
+                                                            site.technology === '4G-TDD-5G' 
+                                                                ? 'bg-purple-100 text-purple-700' 
+                                                                : site.technology === '5G'
+                                                                    ? 'bg-blue-100 text-blue-700'
+                                                                    : 'bg-green-100 text-green-700'
+                                                        }`}>
+                                                            {site.technology}
+                                                        </span>
+                                                    </td>
+                                                    <td className="px-4 py-2 text-slate-600">{site.region || '-'}</td>
+                                                    <td className="px-4 py-2 text-center">
+                                                        {site.has_pmr_done ? (
+                                                            <span className="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-orange-100 text-orange-700">
+                                                                Done ⚠️
+                                                            </span>
+                                                        ) : (
+                                                            <span className="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-slate-100 text-slate-600">
+                                                                Pending
+                                                            </span>
+                                                        )}
+                                                    </td>
+                                                </tr>
+                                            ))}
+                                        </tbody>
+                                    </table>
+                                    {gpsComplianceStats.missingGpsSitesList.length > 100 && (
+                                        <div className="px-4 py-2 bg-slate-50 text-sm text-slate-500 text-center">
+                                            Showing first 100 of {gpsComplianceStats.missingGpsSitesList.length} sites
+                                        </div>
+                                    )}
+                                </div>
+                            </details>
+                        )}
+                    </div>
+                )}
+
                 {/* Area Performance Summary */}
                 {siteStats.length > 0 && (
                     <div className="bg-white border border-slate-200 rounded-lg p-6 mb-4 shadow-sm">
@@ -1093,6 +1371,7 @@ export default function DashboardView() {
                                         <th className="text-center px-4 py-3 font-medium text-slate-700">Total</th>
                                         <th className="text-center px-3 py-3 font-medium text-slate-700">Duplicates</th>
                                         <th className="text-center px-3 py-3 font-medium text-slate-700">Tag Pics</th>
+                                        <th className="text-center px-3 py-3 font-medium text-slate-700">GPS SYS</th>
                                         <th className="text-center px-4 py-3 font-medium text-slate-700">Completion</th>
                                     </tr>
                                 </thead>
@@ -1109,6 +1388,8 @@ export default function DashboardView() {
                                             duplicate_tags: number;
                                             tag_pics_available: number;
                                             tag_pics_required: number;
+                                            gps_total: number;
+                                            gps_found: number;
                                         }>();
                                         
                                         // Use filteredSiteStats to aggregate only sites that pass the filter
@@ -1132,6 +1413,8 @@ export default function DashboardView() {
                                                     duplicate_tags: 0,
                                                     tag_pics_available: 0,
                                                     tag_pics_required: 0,
+                                                    gps_total: 0,
+                                                    gps_found: 0,
                                                 });
                                             }
                                             const data = cityMap.get(city)!;
@@ -1147,6 +1430,14 @@ export default function DashboardView() {
                                             data.duplicate_tags += site.duplicate_tags;
                                             data.tag_pics_available += site.tag_pics_available;
                                             data.tag_pics_required += site.tag_pics_required;
+                                            // GPS tracking: check if site needs GPS (has 4G-TDD/5G)
+                                            const normalizedSiteId = normalizeSiteId(site.site_id);
+                                            if (foTechData.has(normalizedSiteId)) {
+                                                data.gps_total++;
+                                                if (gpsEntrySites.has(normalizedSiteId)) {
+                                                    data.gps_found++;
+                                                }
+                                            }
                                         });
                                         
                                         // Sort by completion percentage descending
@@ -1214,6 +1505,20 @@ export default function DashboardView() {
                                                             </div>
                                                         ) : '-'}
                                                     </td>
+                                                    <td className="px-3 py-3 text-center">
+                                                        {data.gps_total > 0 ? (
+                                                            <div className="flex flex-col items-center">
+                                                                <span className={`text-xs font-medium ${data.gps_found === data.gps_total ? 'text-green-600' : 'text-orange-600'}`}>
+                                                                    {data.gps_found}/{data.gps_total}
+                                                                </span>
+                                                                {data.gps_total - data.gps_found > 0 && (
+                                                                    <span className="text-xs text-red-600">
+                                                                        {data.gps_total - data.gps_found} missing
+                                                                    </span>
+                                                                )}
+                                                            </div>
+                                                        ) : '-'}
+                                                    </td>
                                                     <td className="px-4 py-3 text-center">
                                                         <div className="flex items-center justify-center gap-2">
                                                             <div className="w-16 h-2 bg-slate-200 rounded-full overflow-hidden">
@@ -1260,6 +1565,7 @@ export default function DashboardView() {
                                         <th className="text-center px-4 py-3 font-medium text-slate-700">Total</th>
                                         <th className="text-center px-3 py-3 font-medium text-slate-700">Duplicates</th>
                                         <th className="text-center px-3 py-3 font-medium text-slate-700">Tag Pics</th>
+                                        <th className="text-center px-3 py-3 font-medium text-slate-700">GPS SYS</th>
                                         <th className="text-center px-4 py-3 font-medium text-slate-700">Completion</th>
                                     </tr>
                                 </thead>
@@ -1276,6 +1582,8 @@ export default function DashboardView() {
                                             duplicate_tags: number;
                                             tag_pics_available: number;
                                             tag_pics_required: number;
+                                            gps_total: number;
+                                            gps_found: number;
                                         }>();
                                         
                                         // Use filteredSiteStats to aggregate only sites that pass the filter
@@ -1299,6 +1607,8 @@ export default function DashboardView() {
                                                     duplicate_tags: 0,
                                                     tag_pics_available: 0,
                                                     tag_pics_required: 0,
+                                                    gps_total: 0,
+                                                    gps_found: 0,
                                                 });
                                             }
                                             const data = nfoMap.get(nfo)!;
@@ -1314,6 +1624,14 @@ export default function DashboardView() {
                                             data.duplicate_tags += site.duplicate_tags;
                                             data.tag_pics_available += site.tag_pics_available;
                                             data.tag_pics_required += site.tag_pics_required;
+                                            // GPS tracking: check if site needs GPS (has 4G-TDD/5G)
+                                            const normalizedSiteId = normalizeSiteId(site.site_id);
+                                            if (foTechData.has(normalizedSiteId)) {
+                                                data.gps_total++;
+                                                if (gpsEntrySites.has(normalizedSiteId)) {
+                                                    data.gps_found++;
+                                                }
+                                            }
                                         });
                                         
                                         // Sort by completion percentage descending
@@ -1383,6 +1701,20 @@ export default function DashboardView() {
                                                             </div>
                                                         ) : '-'}
                                                     </td>
+                                                    <td className="px-3 py-3 text-center">
+                                                        {data.gps_total > 0 ? (
+                                                            <div className="flex flex-col items-center">
+                                                                <span className={`text-xs font-medium ${data.gps_found === data.gps_total ? 'text-green-600' : 'text-orange-600'}`}>
+                                                                    {data.gps_found}/{data.gps_total}
+                                                                </span>
+                                                                {data.gps_total - data.gps_found > 0 && (
+                                                                    <span className="text-xs text-red-600">
+                                                                        {data.gps_total - data.gps_found} missing
+                                                                    </span>
+                                                                )}
+                                                            </div>
+                                                        ) : '-'}
+                                                    </td>
                                                     <td className="px-4 py-3 text-center">
                                                         <div className="flex items-center justify-center gap-2">
                                                             <div className="w-16 h-2 bg-slate-200 rounded-full overflow-hidden">
@@ -1446,6 +1778,7 @@ export default function DashboardView() {
                                         <th className="text-center px-4 py-3 font-medium text-slate-700">%</th>
                                         <th className="text-center px-4 py-3 font-medium text-slate-700">Duplicates</th>
                                         <th className="text-center px-4 py-3 font-medium text-slate-700">Tag Pics</th>
+                                        <th className="text-center px-4 py-3 font-medium text-slate-700">GPS SYS</th>
                                     </tr>
                                 </thead>
                                 <tbody className="divide-y divide-slate-100">
@@ -1525,6 +1858,24 @@ export default function DashboardView() {
                                                     ) : (
                                                         <span className="text-slate-400">-</span>
                                                     )}
+                                                </td>
+                                                <td className="px-4 py-3 text-center">
+                                                    {(() => {
+                                                        const normalizedSiteId = normalizeSiteId(site.site_id);
+                                                        const needsGps = foTechData.has(normalizedSiteId);
+                                                        const hasGps = gpsEntrySites.has(normalizedSiteId);
+                                                        if (!needsGps) return <span className="text-slate-400">-</span>;
+                                                        return (
+                                                            <div className="flex flex-col items-center">
+                                                                <span className={`font-medium ${hasGps ? 'text-green-600' : 'text-orange-600'}`}>
+                                                                    {hasGps ? '1/1' : '0/1'}
+                                                                </span>
+                                                                {!hasGps && (
+                                                                    <span className="text-xs text-red-600">1 missing</span>
+                                                                )}
+                                                            </div>
+                                                        );
+                                                    })()}
                                                 </td>
                                             </tr>
                                         );

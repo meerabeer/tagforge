@@ -14,6 +14,7 @@ const TAB_PARAMS: Record<string, string[]> = {
     '/asset-performance': ['startDate', 'endDate', 'city', 'fme', 'month', 'quarter'],
     '/suggestions': ['status'],
     '/trending': ['startDate', 'endDate', 'city', 'nfo'],
+    '/uploads': [],
 };
 
 // Storage keys for preserving params per tab
@@ -32,13 +33,15 @@ export default function AppHeaderTabs() {
     const isTrending = pathname?.startsWith('/trending');
     const isAnalyst = pathname?.startsWith('/analyst');
     const isPMR = pathname?.startsWith('/pmr');
-    const isNFO = !isAnalyst && !isPMR && !isSuggestions && !isDashboard && !isAssetPerformance && !isTrending;
+    const isUploads = pathname?.startsWith('/uploads');
+    const isNFO = !isAnalyst && !isPMR && !isSuggestions && !isDashboard && !isAssetPerformance && !isTrending && !isUploads;
 
     // Get current tab path
     const currentTabPath = isDashboard ? '/dashboard' : 
                           isAssetPerformance ? '/asset-performance' :
                           isSuggestions ? '/suggestions' :
                           isTrending ? '/trending' : 
+                          isUploads ? '/uploads' :
                           isAnalyst ? '/analyst' : 
                           isPMR ? '/pmr' : '/nfo';
 
@@ -167,6 +170,15 @@ export default function AppHeaderTabs() {
                                 }`}
                         >
                             Suggestions
+                        </Link>
+                        <Link
+                            href={buildTabUrl('/uploads')}
+                            className={`px-4 py-2 text-sm font-medium rounded-md transition-colors ${isUploads
+                                ? 'bg-white text-blue-700 shadow-sm'
+                                : 'text-slate-600 hover:text-slate-900 hover:bg-slate-200'
+                                }`}
+                        >
+                            Uploads
                         </Link>
                     </nav>
                 </div>
