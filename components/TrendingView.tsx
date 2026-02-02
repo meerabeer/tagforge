@@ -15,10 +15,11 @@ interface PMRRecord {
     Status: string;
 }
 
-interface InventoryUpdate {
+interface InventoryRow {
     site_id: string;
-    updated_at: string;
-    nfo_name: string | null;
+    updated_at: string | null;
+    tag_category: string | null;
+    photo_category: string | null;
 }
 
 interface NFOPerformanceData {
@@ -30,7 +31,6 @@ interface NFOPerformanceData {
     within_week_submissions: number;
     late_submissions: number;
     no_submission: number;
-    avg_days_delay: number;
 }
 
 interface WeeklyTrend {
@@ -45,8 +45,8 @@ interface WeeklyTrend {
     late_count: number;
     no_submission_count: number;
     same_day_rate: number;
+    next_day_rate: number;
     within_week_rate: number;
-    on_time_rate: number;
 }
 
 // --- Utility Functions ---
@@ -71,16 +71,35 @@ const formatDateShort = (date: Date): string => {
     return `${date.getDate()}-${monthNames[date.getMonth()]}`;
 };
 
+// Get week number based on Monday-start weeks (consistent with getWeekRange)
 const getWeekNumber = (date: Date): number => {
-    const firstDayOfYear = new Date(date.getFullYear(), 0, 1);
-    const pastDaysOfYear = (date.getTime() - firstDayOfYear.getTime()) / 86400000;
-    return Math.ceil((pastDaysOfYear + firstDayOfYear.getDay() + 1) / 7);
+    const year = date.getFullYear();
+    const firstDayOfYear = new Date(year, 0, 1);
+    const daysOffset = firstDayOfYear.getDay();
+    // First Monday of the year (for 2026, Jan 1 is Thursday, so first Monday is Jan 5)
+    const firstMonday = new Date(year, 0, 1 + (daysOffset === 0 ? 1 : 8 - daysOffset));
+    
+    // If date is before first Monday, return 0 (will be filtered/handled separately)
+    if (date < firstMonday) {
+        return 0;
+    }
+    
+    const daysSinceFirstMonday = Math.floor((date.getTime() - firstMonday.getTime()) / 86400000);
+    return Math.floor(daysSinceFirstMonday / 7) + 1;
 };
 
 const getWeekRange = (year: number, weekNum: number): { start: Date; end: Date } => {
     const firstDayOfYear = new Date(year, 0, 1);
     const daysOffset = firstDayOfYear.getDay();
     const firstMonday = new Date(year, 0, 1 + (daysOffset === 0 ? 1 : 8 - daysOffset));
+    
+    // Week 0 is Jan 1 to day before first Monday
+    if (weekNum === 0) {
+        return { 
+            start: firstDayOfYear, 
+            end: new Date(firstMonday.getTime() - 86400000) // Day before first Monday
+        };
+    }
     
     const start = new Date(firstMonday);
     start.setDate(start.getDate() + (weekNum - 1) * 7);
@@ -126,7 +145,7 @@ export default function TrendingView() {
 
     const [viewMode, setViewMode] = useState<'table' | 'chart'>('chart');
     const [selectedWeeks, setSelectedWeeks] = useState<number[]>([]);
-    const [chartMetric, setChartMetric] = useState<'same_day_rate' | 'on_time_rate'>('same_day_rate');
+    const [chartMetric, setChartMetric] = useState<'same_day_rate' | 'within_week_rate'>('same_day_rate');
 
     const updateUrlParams = useCallback((updates: Record<string, string>) => {
         setParams(router, pathname, searchParams, updates);
@@ -194,6 +213,7 @@ export default function TrendingView() {
             const startDateObj = new Date(startYear, startMonth - 1, startDay);
             const endDateObj = new Date(endYear, endMonth - 1, endDay);
 
+            // 1. Fetch PMR records with Actual Date in range
             let pmrQuery = supabase.from('pmr_actual_2026').select('Site_ID, Site_ID_1, City, "FME Name", "Autual_PMR_Date", Status').not('Autual_PMR_Date', 'is', null);
             if (selectedCity) pmrQuery = pmrQuery.eq('City', selectedCity);
             if (selectedNFO) pmrQuery = pmrQuery.eq('FME Name', selectedNFO);
@@ -201,6 +221,7 @@ export default function TrendingView() {
             const { data: pmrData, error: pmrError } = await pmrQuery;
             if (pmrError) throw pmrError;
 
+            // Filter by actual date range (matching NFO Performance logic)
             const filteredPMRs = (pmrData || []).filter(p => {
                 const date = parsePMRDate(p['Autual_PMR_Date']);
                 return date && date >= startDateObj && date <= endDateObj;
@@ -210,12 +231,11 @@ export default function TrendingView() {
                 setNfoPerformance([]); setWeeklyTrends([]); setLoading(false); return;
             }
 
+            // 2. Collect site IDs (use W-format to match inventory)
             const allSiteIds = new Set<string>();
             filteredPMRs.forEach(p => {
                 if (p.Site_ID_1) allSiteIds.add(p.Site_ID_1);
-                if (p.Site_ID) allSiteIds.add(p.Site_ID);
                 if (p.Site_ID && !p.Site_ID.startsWith('W')) allSiteIds.add(`W${p.Site_ID}`);
-                if (p.Site_ID_1 && p.Site_ID_1.startsWith('W')) allSiteIds.add(p.Site_ID_1.substring(1));
             });
 
             const siteIdArray = Array.from(allSiteIds);
@@ -223,40 +243,68 @@ export default function TrendingView() {
             const batches: string[][] = [];
             for (let i = 0; i < siteIdArray.length; i += BATCH_SIZE) batches.push(siteIdArray.slice(i, i + BATCH_SIZE));
 
-            const fetchBatch = async (batch: string[]): Promise<InventoryUpdate[]> => {
-                const results: InventoryUpdate[] = [];
+            // 3. Fetch inventory rows with tag_category & photo_category (matching NFO Performance)
+            const fetchBatch = async (batch: string[]): Promise<InventoryRow[]> => {
+                const results: InventoryRow[] = [];
                 let hasMore = true, offset = 0;
                 while (hasMore) {
-                    const { data, error } = await supabase.from('main_inventory').select('site_id, updated_at, nfo_name').in('site_id', batch).range(offset, offset + PAGE_SIZE - 1);
+                    const { data, error } = await supabase
+                        .from('main_inventory')
+                        .select('site_id, updated_at, tag_category, photo_category')
+                        .in('site_id', batch)
+                        .range(offset, offset + PAGE_SIZE - 1);
                     if (error) throw new Error(error.message);
-                    if (data && data.length > 0) { results.push(...(data as InventoryUpdate[])); offset += PAGE_SIZE; hasMore = data.length === PAGE_SIZE; }
-                    else hasMore = false;
+                    if (data && data.length > 0) { 
+                        results.push(...(data as InventoryRow[])); 
+                        offset += PAGE_SIZE; 
+                        hasMore = data.length === PAGE_SIZE; 
+                    } else hasMore = false;
                 }
                 return results;
             };
 
             const inventoryData = (await Promise.all(batches.map(fetchBatch))).flat();
-            const inventoryBySite = new Map<string, { earliest: Date | null; latest: Date | null }>();
+            
+            // 4. Group inventory by site and calculate completion
+            // Submission = 100% complete (ALL rows have both tag_category AND photo_category)
+            const siteSubmissionMap = new Map<string, { isSubmitted: boolean; latestUpdateDate: Date | null }>();
+            
+            // Group rows by site
+            const rowsBySite = new Map<string, InventoryRow[]>();
             inventoryData.forEach(row => {
-                const updateDate = row.updated_at ? new Date(row.updated_at) : null;
-                if (!inventoryBySite.has(row.site_id)) inventoryBySite.set(row.site_id, { earliest: updateDate, latest: updateDate });
-                else {
-                    const existing = inventoryBySite.get(row.site_id)!;
-                    if (updateDate) {
-                        if (!existing.earliest || updateDate < existing.earliest) existing.earliest = updateDate;
-                        if (!existing.latest || updateDate > existing.latest) existing.latest = updateDate;
-                    }
+                if (!rowsBySite.has(row.site_id)) rowsBySite.set(row.site_id, []);
+                rowsBySite.get(row.site_id)!.push(row);
+            });
+            
+            // Calculate submission status per site (matching NFO Performance: >10% completion = submitted)
+            rowsBySite.forEach((rows, siteId) => {
+                const totalRows = rows.length;
+                const filledRows = rows.filter(r => r.tag_category && r.photo_category);
+                const completionPct = totalRows > 0 ? (filledRows.length / totalRows) * 100 : 0;
+                const isSubmitted = completionPct > 10; // Match NFO Performance logic
+                
+                // Get latest updated_at from filled rows only if submitted
+                let latestUpdateDate: Date | null = null;
+                if (isSubmitted && filledRows.length > 0) {
+                    filledRows.forEach(r => {
+                        if (r.updated_at) {
+                            const d = new Date(r.updated_at);
+                            if (!latestUpdateDate || d > latestUpdateDate) latestUpdateDate = d;
+                        }
+                    });
                 }
+                
+                siteSubmissionMap.set(siteId, { isSubmitted, latestUpdateDate });
             });
 
-            const findInventoryForSite = (siteId1: string, siteId: string) => {
-                if (siteId1 && inventoryBySite.has(siteId1)) return inventoryBySite.get(siteId1);
-                if (siteId && inventoryBySite.has(siteId)) return inventoryBySite.get(siteId);
-                if (siteId && !siteId.startsWith('W') && inventoryBySite.has(`W${siteId}`)) return inventoryBySite.get(`W${siteId}`);
-                if (siteId1 && siteId1.startsWith('W') && inventoryBySite.has(siteId1.substring(1))) return inventoryBySite.get(siteId1.substring(1));
+            // Helper to find submission for a site
+            const findSubmissionForSite = (siteId1: string, siteId: string) => {
+                const wId = siteId1 || (siteId && !siteId.startsWith('W') ? `W${siteId}` : siteId);
+                if (wId && siteSubmissionMap.has(wId)) return siteSubmissionMap.get(wId);
                 return null;
             };
 
+            // 5. Process each PMR and calculate timing
             const nfoMap = new Map<string, NFOPerformanceData>();
             const weekMap = new Map<number, WeeklyTrend>();
 
@@ -266,35 +314,83 @@ export default function TrendingView() {
                 const pmrDate = parsePMRDate(pmr['Autual_PMR_Date']);
                 if (!pmrDate) return;
 
-                if (!nfoMap.has(fmeName)) nfoMap.set(fmeName, { fme_name: fmeName, city, total_pmrs: 0, same_day_submissions: 0, next_day_submissions: 0, within_week_submissions: 0, late_submissions: 0, no_submission: 0, avg_days_delay: 0 });
+                // Initialize NFO data
+                if (!nfoMap.has(fmeName)) {
+                    nfoMap.set(fmeName, { 
+                        fme_name: fmeName, 
+                        city, 
+                        total_pmrs: 0, 
+                        same_day_submissions: 0, 
+                        next_day_submissions: 0,
+                        within_week_submissions: 0, 
+                        late_submissions: 0, 
+                        no_submission: 0 
+                    });
+                }
                 const nfoData = nfoMap.get(fmeName)!;
                 nfoData.total_pmrs++;
 
+                // Initialize week data
                 const weekNum = getWeekNumber(pmrDate);
                 if (!weekMap.has(weekNum)) {
                     const { start, end } = getWeekRange(2026, weekNum);
-                    weekMap.set(weekNum, { week_number: weekNum, week_label: `Week ${weekNum}`, start_date: start, end_date: end, total_pmrs: 0, same_day_count: 0, next_day_count: 0, within_week_count: 0, late_count: 0, no_submission_count: 0, same_day_rate: 0, within_week_rate: 0, on_time_rate: 0 });
+                    weekMap.set(weekNum, { 
+                        week_number: weekNum, 
+                        week_label: weekNum === 0 ? 'Pre-Week' : `Week ${weekNum}`, 
+                        start_date: start, 
+                        end_date: end, 
+                        total_pmrs: 0, 
+                        same_day_count: 0, 
+                        next_day_count: 0,
+                        within_week_count: 0, 
+                        late_count: 0, 
+                        no_submission_count: 0, 
+                        same_day_rate: 0, 
+                        next_day_rate: 0,
+                        within_week_rate: 0 
+                    });
                 }
                 const weekData = weekMap.get(weekNum)!;
                 weekData.total_pmrs++;
 
-                const siteInv = findInventoryForSite(pmr.Site_ID_1, pmr.Site_ID);
-                const submissionDate = siteInv?.latest || null;
-
-                if (submissionDate) {
-                    const daysDelay = daysDifference(pmrDate, submissionDate);
-                    if (daysDelay <= 0) { nfoData.same_day_submissions++; weekData.same_day_count++; }
-                    else if (daysDelay === 1) { nfoData.next_day_submissions++; weekData.next_day_count++; }
-                    else if (daysDelay <= 7) { nfoData.within_week_submissions++; weekData.within_week_count++; }
-                    else { nfoData.late_submissions++; weekData.late_count++; }
-                } else { nfoData.no_submission++; weekData.no_submission_count++; }
+                // Check submission status
+                const siteSubmission = findSubmissionForSite(pmr.Site_ID_1, pmr.Site_ID);
+                
+                if (siteSubmission?.isSubmitted && siteSubmission.latestUpdateDate) {
+                    // Site is submitted - calculate delay
+                    const daysDelay = daysDifference(pmrDate, siteSubmission.latestUpdateDate);
+                    
+                    if (daysDelay <= 0) { 
+                        // Same Day (submitted on or before PMR date)
+                        nfoData.same_day_submissions++; 
+                        weekData.same_day_count++; 
+                    } else if (daysDelay === 1) { 
+                        // Next Day (1 day after PMR)
+                        nfoData.next_day_submissions++; 
+                        weekData.next_day_count++; 
+                    } else if (daysDelay <= 7) { 
+                        // Within Week (2-7 days after PMR)
+                        nfoData.within_week_submissions++; 
+                        weekData.within_week_count++; 
+                    } else { 
+                        // Late (>7 days)
+                        nfoData.late_submissions++; 
+                        weekData.late_count++; 
+                    }
+                } else { 
+                    // Not submitted (not 100% complete or no inventory)
+                    nfoData.no_submission++; 
+                    weekData.no_submission_count++; 
+                }
             });
 
+            // 6. Calculate rates
             weekMap.forEach(week => {
                 if (week.total_pmrs > 0) {
                     week.same_day_rate = (week.same_day_count / week.total_pmrs) * 100;
-                    week.on_time_rate = ((week.same_day_count + week.next_day_count + week.within_week_count) / week.total_pmrs) * 100;
-                    week.within_week_rate = week.on_time_rate;
+                    week.next_day_rate = (week.next_day_count / week.total_pmrs) * 100;
+                    // within_week_rate is cumulative: same_day + next_day + within_week (2-7)
+                    week.within_week_rate = ((week.same_day_count + week.next_day_count + week.within_week_count) / week.total_pmrs) * 100;
                 }
             });
 
@@ -315,10 +411,21 @@ export default function TrendingView() {
         const total = nfoPerformance.reduce((s, n) => s + n.total_pmrs, 0);
         const sameDay = nfoPerformance.reduce((s, n) => s + n.same_day_submissions, 0);
         const nextDay = nfoPerformance.reduce((s, n) => s + n.next_day_submissions, 0);
-        const withinWeek = nfoPerformance.reduce((s, n) => s + n.within_week_submissions, 0);
+        const withinWeek2to7 = nfoPerformance.reduce((s, n) => s + n.within_week_submissions, 0);
         const late = nfoPerformance.reduce((s, n) => s + n.late_submissions, 0);
         const noSubmission = nfoPerformance.reduce((s, n) => s + n.no_submission, 0);
-        return { total, sameDay, nextDay, withinWeek, late, noSubmission, sameDayRate: total > 0 ? (sameDay / total) * 100 : 0, onTimeRate: total > 0 ? ((sameDay + nextDay + withinWeek) / total) * 100 : 0 };
+        const withinWeekTotal = sameDay + nextDay + withinWeek2to7; // cumulative: 0 + 1 + 2-7 days
+        return { 
+            total, 
+            sameDay, 
+            nextDay,
+            withinWeek: withinWeekTotal, 
+            late, 
+            noSubmission, 
+            sameDayRate: total > 0 ? (sameDay / total) * 100 : 0, 
+            nextDayRate: total > 0 ? (nextDay / total) * 100 : 0,
+            withinWeekRate: total > 0 ? (withinWeekTotal / total) * 100 : 0 
+        };
     }, [nfoPerformance]);
 
     const selectedWeeksData = useMemo(() => weeklyTrends.filter(w => selectedWeeks.includes(w.week_number)), [weeklyTrends, selectedWeeks]);
@@ -327,11 +434,11 @@ export default function TrendingView() {
         if (selectedWeeksData.length < 2) return [];
         return selectedWeeksData.slice(1).map((week, idx) => {
             const prevWeek = selectedWeeksData[idx];
-            return { from: prevWeek.week_label, to: week.week_label, sameDayChange: week.same_day_rate - prevWeek.same_day_rate, onTimeChange: week.on_time_rate - prevWeek.on_time_rate };
+            return { from: prevWeek.week_label, to: week.week_label, sameDayChange: week.same_day_rate - prevWeek.same_day_rate, withinWeekChange: week.within_week_rate - prevWeek.within_week_rate };
         });
     }, [selectedWeeksData]);
 
-    const getMetricLabel = (metric: string) => metric === 'same_day_rate' ? 'Same Day Rate' : 'On-Time Rate (≤7 days)';
+    const getMetricLabel = (metric: string) => metric === 'same_day_rate' ? 'Same Day Rate' : 'Within Week Rate (≤7 days)';
 
     return (
         <div className="min-h-screen bg-slate-50 pb-10">
@@ -378,16 +485,16 @@ export default function TrendingView() {
                     <>
                         <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-4 mb-6">
                             <div className="bg-white rounded-lg shadow-sm border border-slate-200 p-4"><p className="text-sm text-slate-500">Total PMRs</p><p className="text-2xl font-bold text-slate-900">{summaryStats.total}</p></div>
-                            <div className="bg-green-50 rounded-lg shadow-sm border border-green-200 p-4"><p className="text-sm text-green-700">Same Day</p><p className="text-2xl font-bold text-green-800">{summaryStats.sameDay}</p><p className="text-xs text-green-600">{summaryStats.sameDayRate.toFixed(1)}%</p></div>
-                            <div className="bg-blue-50 rounded-lg shadow-sm border border-blue-200 p-4"><p className="text-sm text-blue-700">Next Day</p><p className="text-2xl font-bold text-blue-800">{summaryStats.nextDay}</p></div>
-                            <div className="bg-yellow-50 rounded-lg shadow-sm border border-yellow-200 p-4"><p className="text-sm text-yellow-700">Within Week</p><p className="text-2xl font-bold text-yellow-800">{summaryStats.withinWeek}</p></div>
-                            <div className="bg-orange-50 rounded-lg shadow-sm border border-orange-200 p-4"><p className="text-sm text-orange-700">Late (&gt;7 days)</p><p className="text-2xl font-bold text-orange-800">{summaryStats.late}</p></div>
+                            <div className="bg-green-50 rounded-lg shadow-sm border border-green-200 p-4"><p className="text-sm text-green-700">Same Day (0)</p><p className="text-2xl font-bold text-green-800">{summaryStats.sameDay}</p><p className="text-xs text-green-600">{summaryStats.sameDayRate.toFixed(1)}%</p></div>
+                            <div className="bg-blue-50 rounded-lg shadow-sm border border-blue-200 p-4"><p className="text-sm text-blue-700">Next Day (1)</p><p className="text-2xl font-bold text-blue-800">{summaryStats.nextDay}</p><p className="text-xs text-blue-600">{summaryStats.nextDayRate.toFixed(1)}%</p></div>
+                            <div className="bg-yellow-50 rounded-lg shadow-sm border border-yellow-200 p-4"><p className="text-sm text-yellow-700">Within Week (≤7)</p><p className="text-2xl font-bold text-yellow-800">{summaryStats.withinWeek}</p><p className="text-xs text-yellow-600">{summaryStats.withinWeekRate.toFixed(1)}%</p></div>
+                            <div className="bg-orange-50 rounded-lg shadow-sm border border-orange-200 p-4"><p className="text-sm text-orange-700">Late (&gt;7)</p><p className="text-2xl font-bold text-orange-800">{summaryStats.late}</p></div>
                             <div className="bg-red-50 rounded-lg shadow-sm border border-red-200 p-4"><p className="text-sm text-red-700">Not Submitted</p><p className="text-2xl font-bold text-red-800">{summaryStats.noSubmission}</p></div>
                         </div>
 
                         <div className="bg-gradient-to-r from-blue-500 to-indigo-600 rounded-lg shadow-lg p-6 mb-6 text-white">
                             <div className="flex items-center justify-between">
-                                <div><p className="text-blue-100 text-sm">Overall On-Time Rate (≤7 days)</p><p className="text-4xl font-bold">{summaryStats.onTimeRate.toFixed(1)}%</p></div>
+                                <div><p className="text-blue-100 text-sm">Within Week Rate (≤7 days)</p><p className="text-4xl font-bold">{summaryStats.withinWeekRate.toFixed(1)}%</p></div>
                                 <div className="text-right"><p className="text-blue-100 text-sm">Same Day Rate</p><p className="text-2xl font-semibold">{summaryStats.sameDayRate.toFixed(1)}%</p></div>
                             </div>
                         </div>
@@ -399,7 +506,7 @@ export default function TrendingView() {
                                         <button onClick={() => setViewMode('chart')} className={`px-4 py-2 text-sm font-medium ${viewMode === 'chart' ? 'bg-blue-600 text-white' : 'bg-white text-slate-700 hover:bg-slate-50'}`}>📈 Chart</button>
                                         <button onClick={() => setViewMode('table')} className={`px-4 py-2 text-sm font-medium ${viewMode === 'table' ? 'bg-blue-600 text-white' : 'bg-white text-slate-700 hover:bg-slate-50'}`}>📊 Table</button>
                                     </div>
-                                    {viewMode === 'chart' && <select value={chartMetric} onChange={(e) => setChartMetric(e.target.value as 'same_day_rate' | 'on_time_rate')} className="px-3 py-2 border border-slate-300 rounded-md text-sm"><option value="same_day_rate">Same Day Rate</option><option value="on_time_rate">On-Time Rate (≤7 days)</option></select>}
+                                    {viewMode === 'chart' && <select value={chartMetric} onChange={(e) => setChartMetric(e.target.value as 'same_day_rate' | 'within_week_rate')} className="px-3 py-2 border border-slate-300 rounded-md text-sm"><option value="same_day_rate">Same Day Rate</option><option value="within_week_rate">Within Week Rate (≤7 days)</option></select>}
                                 </div>
                             </div>
                             <div>
@@ -440,7 +547,7 @@ export default function TrendingView() {
                                                     <p className="text-sm text-slate-600 mb-2">{change.from} → {change.to}</p>
                                                     <div className="flex items-center gap-4">
                                                         <div><p className="text-xs text-slate-500">Same Day</p><p className={`text-lg font-bold ${change.sameDayChange >= 0 ? 'text-green-600' : 'text-red-600'}`}>{change.sameDayChange >= 0 ? '↑' : '↓'} {Math.abs(change.sameDayChange).toFixed(1)}%</p></div>
-                                                        <div><p className="text-xs text-slate-500">On-Time</p><p className={`text-lg font-bold ${change.onTimeChange >= 0 ? 'text-green-600' : 'text-red-600'}`}>{change.onTimeChange >= 0 ? '↑' : '↓'} {Math.abs(change.onTimeChange).toFixed(1)}%</p></div>
+                                                        <div><p className="text-xs text-slate-500">Within Week</p><p className={`text-lg font-bold ${change.withinWeekChange >= 0 ? 'text-green-600' : 'text-red-600'}`}>{change.withinWeekChange >= 0 ? '↑' : '↓'} {Math.abs(change.withinWeekChange).toFixed(1)}%</p></div>
                                                     </div>
                                                 </div>
                                             ))}
@@ -454,12 +561,12 @@ export default function TrendingView() {
                                         {selectedWeeksData.map((week, idx) => (
                                             <div key={week.week_number} className="flex items-center gap-4">
                                                 <div className="w-20 text-sm font-medium text-slate-700">{week.week_label}</div>
-                                                <div className="flex-1"><div className="h-8 bg-slate-100 rounded-full overflow-hidden relative"><div className="absolute h-full bg-blue-200 rounded-full" style={{ width: `${week.on_time_rate}%` }} /><div className="absolute h-full rounded-full" style={{ width: `${week.same_day_rate}%`, backgroundColor: CHART_COLORS[idx % CHART_COLORS.length] }} /></div></div>
-                                                <div className="w-32 text-right"><span className="text-sm font-bold" style={{ color: CHART_COLORS[idx % CHART_COLORS.length] }}>{week.same_day_rate.toFixed(1)}%</span><span className="text-slate-400 mx-1">/</span><span className="text-sm text-blue-600">{week.on_time_rate.toFixed(1)}%</span></div>
+                                                <div className="flex-1"><div className="h-8 bg-slate-100 rounded-full overflow-hidden relative"><div className="absolute h-full bg-blue-200 rounded-full" style={{ width: `${week.within_week_rate}%` }} /><div className="absolute h-full rounded-full" style={{ width: `${week.same_day_rate}%`, backgroundColor: CHART_COLORS[idx % CHART_COLORS.length] }} /></div></div>
+                                                <div className="w-32 text-right"><span className="text-sm font-bold" style={{ color: CHART_COLORS[idx % CHART_COLORS.length] }}>{week.same_day_rate.toFixed(1)}%</span><span className="text-slate-400 mx-1">/</span><span className="text-sm text-blue-600">{week.within_week_rate.toFixed(1)}%</span></div>
                                             </div>
                                         ))}
                                     </div>
-                                    <div className="mt-4 flex gap-6 text-sm"><div className="flex items-center gap-2"><div className="w-4 h-4 bg-blue-500 rounded"></div><span>Same Day</span></div><div className="flex items-center gap-2"><div className="w-4 h-4 bg-blue-200 rounded"></div><span>On-Time (≤7 days)</span></div></div>
+                                    <div className="mt-4 flex gap-6 text-sm"><div className="flex items-center gap-2"><div className="w-4 h-4 bg-blue-500 rounded"></div><span>Same Day</span></div><div className="flex items-center gap-2"><div className="w-4 h-4 bg-blue-200 rounded"></div><span>Within Week (≤7 days)</span></div></div>
                                 </div>
                             </div>
                         )}
@@ -470,8 +577,8 @@ export default function TrendingView() {
                                     <div className="px-4 py-3 bg-slate-50 border-b"><h3 className="text-lg font-semibold text-slate-900">Weekly Performance</h3></div>
                                     <div className="overflow-x-auto">
                                         <table className="min-w-full divide-y divide-slate-200">
-                                            <thead className="bg-slate-50"><tr><th className="px-4 py-3 text-left text-xs font-medium text-slate-500 uppercase">Week</th><th className="px-4 py-3 text-left text-xs font-medium text-slate-500 uppercase">Date Range</th><th className="px-4 py-3 text-center text-xs font-medium text-slate-500 uppercase">PMRs</th><th className="px-4 py-3 text-center text-xs font-medium text-green-700 uppercase bg-green-50">Same Day</th><th className="px-4 py-3 text-center text-xs font-medium text-blue-700 uppercase bg-blue-50">Next Day</th><th className="px-4 py-3 text-center text-xs font-medium text-yellow-700 uppercase bg-yellow-50">Within Week</th><th className="px-4 py-3 text-center text-xs font-medium text-orange-700 uppercase bg-orange-50">Late</th><th className="px-4 py-3 text-center text-xs font-medium text-slate-500 uppercase">On-Time %</th></tr></thead>
-                                            <tbody className="divide-y divide-slate-200">{weeklyTrends.map((week, idx) => <tr key={week.week_number} className={idx % 2 === 0 ? 'bg-white' : 'bg-slate-50'}><td className="px-4 py-3 text-sm font-medium text-slate-900">{week.week_label}</td><td className="px-4 py-3 text-sm text-slate-600">{formatDateShort(week.start_date)} - {formatDateShort(week.end_date)}</td><td className="px-4 py-3 text-sm text-center font-semibold">{week.total_pmrs}</td><td className="px-4 py-3 text-sm text-center bg-green-50"><span className="text-green-700 font-medium">{week.same_day_count}</span><span className="text-green-500 text-xs ml-1">({week.same_day_rate.toFixed(0)}%)</span></td><td className="px-4 py-3 text-sm text-center bg-blue-50 text-blue-700">{week.next_day_count}</td><td className="px-4 py-3 text-sm text-center bg-yellow-50 text-yellow-700">{week.within_week_count}</td><td className="px-4 py-3 text-sm text-center bg-orange-50 text-orange-700">{week.late_count}</td><td className="px-4 py-3 text-center"><span className={`inline-flex px-2 py-1 rounded-full text-xs font-medium ${week.on_time_rate >= 80 ? 'bg-green-100 text-green-800' : week.on_time_rate >= 50 ? 'bg-yellow-100 text-yellow-800' : 'bg-red-100 text-red-800'}`}>{week.on_time_rate.toFixed(1)}%</span></td></tr>)}</tbody>
+                                            <thead className="bg-slate-50"><tr><th className="px-4 py-3 text-left text-xs font-medium text-slate-500 uppercase">Week</th><th className="px-4 py-3 text-left text-xs font-medium text-slate-500 uppercase">Date Range</th><th className="px-4 py-3 text-center text-xs font-medium text-slate-500 uppercase">PMRs</th><th className="px-4 py-3 text-center text-xs font-medium text-green-700 uppercase bg-green-50">Same Day (0)</th><th className="px-4 py-3 text-center text-xs font-medium text-blue-700 uppercase bg-blue-50">Next Day (1)</th><th className="px-4 py-3 text-center text-xs font-medium text-yellow-700 uppercase bg-yellow-50">Within Week (≤7)</th><th className="px-4 py-3 text-center text-xs font-medium text-orange-700 uppercase bg-orange-50">Late (&gt;7)</th><th className="px-4 py-3 text-center text-xs font-medium text-red-700 uppercase bg-red-50">No Submit</th></tr></thead>
+                                            <tbody className="divide-y divide-slate-200">{weeklyTrends.map((week, idx) => { const withinWeekTotal = week.same_day_count + week.next_day_count + week.within_week_count; return <tr key={week.week_number} className={idx % 2 === 0 ? 'bg-white' : 'bg-slate-50'}><td className="px-4 py-3 text-sm font-medium text-slate-900">{week.week_label}</td><td className="px-4 py-3 text-sm text-slate-600">{formatDateShort(week.start_date)} - {formatDateShort(week.end_date)}</td><td className="px-4 py-3 text-sm text-center font-semibold">{week.total_pmrs}</td><td className="px-4 py-3 text-sm text-center bg-green-50"><span className="text-green-700 font-medium">{week.same_day_count}</span><span className="text-green-500 text-xs ml-1">({week.same_day_rate.toFixed(0)}%)</span></td><td className="px-4 py-3 text-sm text-center bg-blue-50"><span className="text-blue-700 font-medium">{week.next_day_count}</span><span className="text-blue-500 text-xs ml-1">({week.next_day_rate.toFixed(0)}%)</span></td><td className="px-4 py-3 text-sm text-center bg-yellow-50"><span className="text-yellow-700 font-medium">{withinWeekTotal}</span><span className="text-yellow-500 text-xs ml-1">({week.within_week_rate.toFixed(0)}%)</span></td><td className="px-4 py-3 text-sm text-center bg-orange-50 text-orange-700">{week.late_count}</td><td className="px-4 py-3 text-sm text-center bg-red-50 text-red-700">{week.no_submission_count}</td></tr>; })}</tbody>
                                         </table>
                                     </div>
                                 </div>
@@ -480,8 +587,8 @@ export default function TrendingView() {
                                     <div className="px-4 py-3 bg-slate-50 border-b"><h3 className="text-lg font-semibold text-slate-900">NFO Performance</h3></div>
                                     <div className="overflow-x-auto">
                                         <table className="min-w-full divide-y divide-slate-200">
-                                            <thead className="bg-slate-50"><tr><th className="px-4 py-3 text-left text-xs font-medium text-slate-500 uppercase">NFO</th><th className="px-4 py-3 text-left text-xs font-medium text-slate-500 uppercase">City</th><th className="px-4 py-3 text-center text-xs font-medium text-slate-500 uppercase">PMRs</th><th className="px-4 py-3 text-center text-xs font-medium text-green-700 uppercase bg-green-50">Same Day</th><th className="px-4 py-3 text-center text-xs font-medium text-blue-700 uppercase bg-blue-50">Next Day</th><th className="px-4 py-3 text-center text-xs font-medium text-yellow-700 uppercase bg-yellow-50">Within Week</th><th className="px-4 py-3 text-center text-xs font-medium text-orange-700 uppercase bg-orange-50">Late</th><th className="px-4 py-3 text-center text-xs font-medium text-red-700 uppercase bg-red-50">No Submit</th><th className="px-4 py-3 text-center text-xs font-medium text-slate-500 uppercase">On-Time %</th></tr></thead>
-                                            <tbody className="divide-y divide-slate-200">{nfoPerformance.map((nfo, idx) => { const onTimeRate = nfo.total_pmrs > 0 ? ((nfo.same_day_submissions + nfo.next_day_submissions + nfo.within_week_submissions) / nfo.total_pmrs) * 100 : 0; return <tr key={nfo.fme_name} className={idx % 2 === 0 ? 'bg-white' : 'bg-slate-50'}><td className="px-4 py-3 text-sm font-medium text-slate-900">{nfo.fme_name}</td><td className="px-4 py-3 text-sm text-slate-600">{nfo.city}</td><td className="px-4 py-3 text-sm text-center font-semibold">{nfo.total_pmrs}</td><td className="px-4 py-3 text-sm text-center bg-green-50 text-green-700 font-medium">{nfo.same_day_submissions}</td><td className="px-4 py-3 text-sm text-center bg-blue-50 text-blue-700">{nfo.next_day_submissions}</td><td className="px-4 py-3 text-sm text-center bg-yellow-50 text-yellow-700">{nfo.within_week_submissions}</td><td className="px-4 py-3 text-sm text-center bg-orange-50 text-orange-700">{nfo.late_submissions}</td><td className="px-4 py-3 text-sm text-center bg-red-50 text-red-700">{nfo.no_submission}</td><td className="px-4 py-3 text-center"><span className={`inline-flex px-2 py-1 rounded-full text-xs font-medium ${onTimeRate >= 80 ? 'bg-green-100 text-green-800' : onTimeRate >= 50 ? 'bg-yellow-100 text-yellow-800' : 'bg-red-100 text-red-800'}`}>{onTimeRate.toFixed(1)}%</span></td></tr>; })}</tbody>
+                                            <thead className="bg-slate-50"><tr><th className="px-4 py-3 text-left text-xs font-medium text-slate-500 uppercase">NFO</th><th className="px-4 py-3 text-left text-xs font-medium text-slate-500 uppercase">City</th><th className="px-4 py-3 text-center text-xs font-medium text-slate-500 uppercase">PMRs</th><th className="px-4 py-3 text-center text-xs font-medium text-green-700 uppercase bg-green-50">Same Day (0)</th><th className="px-4 py-3 text-center text-xs font-medium text-blue-700 uppercase bg-blue-50">Next Day (1)</th><th className="px-4 py-3 text-center text-xs font-medium text-yellow-700 uppercase bg-yellow-50">Within Week (≤7)</th><th className="px-4 py-3 text-center text-xs font-medium text-orange-700 uppercase bg-orange-50">Late (&gt;7)</th><th className="px-4 py-3 text-center text-xs font-medium text-red-700 uppercase bg-red-50">No Submit</th></tr></thead>
+                                            <tbody className="divide-y divide-slate-200">{nfoPerformance.map((nfo, idx) => { const sameDayRate = nfo.total_pmrs > 0 ? (nfo.same_day_submissions / nfo.total_pmrs) * 100 : 0; const nextDayRate = nfo.total_pmrs > 0 ? (nfo.next_day_submissions / nfo.total_pmrs) * 100 : 0; const withinWeekTotal = nfo.same_day_submissions + nfo.next_day_submissions + nfo.within_week_submissions; const withinWeekRate = nfo.total_pmrs > 0 ? (withinWeekTotal / nfo.total_pmrs) * 100 : 0; return <tr key={nfo.fme_name} className={idx % 2 === 0 ? 'bg-white' : 'bg-slate-50'}><td className="px-4 py-3 text-sm font-medium text-slate-900">{nfo.fme_name}</td><td className="px-4 py-3 text-sm text-slate-600">{nfo.city}</td><td className="px-4 py-3 text-sm text-center font-semibold">{nfo.total_pmrs}</td><td className="px-4 py-3 text-sm text-center bg-green-50"><span className="text-green-700 font-medium">{nfo.same_day_submissions}</span><span className="text-green-500 text-xs ml-1">({sameDayRate.toFixed(0)}%)</span></td><td className="px-4 py-3 text-sm text-center bg-blue-50"><span className="text-blue-700 font-medium">{nfo.next_day_submissions}</span><span className="text-blue-500 text-xs ml-1">({nextDayRate.toFixed(0)}%)</span></td><td className="px-4 py-3 text-sm text-center bg-yellow-50"><span className="text-yellow-700 font-medium">{withinWeekTotal}</span><span className="text-yellow-500 text-xs ml-1">({withinWeekRate.toFixed(0)}%)</span></td><td className="px-4 py-3 text-sm text-center bg-orange-50 text-orange-700">{nfo.late_submissions}</td><td className="px-4 py-3 text-sm text-center bg-red-50 text-red-700">{nfo.no_submission}</td></tr>; })}</tbody>
                                         </table>
                                     </div>
                                 </div>
