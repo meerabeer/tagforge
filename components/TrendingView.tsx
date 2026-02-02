@@ -49,6 +49,36 @@ interface WeeklyTrend {
     within_week_rate: number;
 }
 
+// Weekly trend by Area or NFO
+interface EntityWeeklyTrend {
+    entity_name: string; // City name or NFO name
+    entity_type: 'area' | 'nfo';
+    weeks: Map<number, {
+        week_number: number;
+        total_pmrs: number;
+        same_day_count: number;
+        next_day_count: number;
+        within_week_count: number;
+        late_count: number;
+        no_submission_count: number;
+        same_day_rate: number;
+        within_week_rate: number;
+    }>;
+    // Aggregated performance
+    total_pmrs: number;
+    avg_same_day_rate: number;
+    avg_within_week_rate: number;
+    performance_status: 'excellent' | 'good' | 'needs_improvement' | 'problematic';
+}
+
+// Performance thresholds
+const PERFORMANCE_THRESHOLDS = {
+    excellent: { same_day: 80, within_week: 95 },     // ≥80% same day OR ≥95% within week
+    good: { same_day: 60, within_week: 85 },          // ≥60% same day OR ≥85% within week  
+    needs_improvement: { same_day: 40, within_week: 70 }, // ≥40% same day OR ≥70% within week
+    // Below needs_improvement = problematic
+};
+
 // --- Utility Functions ---
 const months: Record<string, number> = {
     'Jan': 0, 'Feb': 1, 'Mar': 2, 'Apr': 3, 'May': 4, 'Jun': 5,
@@ -115,7 +145,34 @@ const daysDifference = (date1: Date, date2: Date): number => {
     return Math.floor(diffTime / (1000 * 60 * 60 * 24));
 };
 
-const CHART_COLORS = ['#3b82f6', '#10b981', '#f59e0b', '#ef4444', '#8b5cf6', '#ec4899', '#06b6d4'];
+const CHART_COLORS = ['#3b82f6', '#10b981', '#f59e0b', '#ef4444', '#8b5cf6', '#ec4899', '#06b6d4', '#84cc16', '#f97316', '#14b8a6', '#a855f7', '#64748b'];
+
+const getPerformanceStatus = (sameDayRate: number, withinWeekRate: number): 'excellent' | 'good' | 'needs_improvement' | 'problematic' => {
+    if (sameDayRate >= PERFORMANCE_THRESHOLDS.excellent.same_day || withinWeekRate >= PERFORMANCE_THRESHOLDS.excellent.within_week) return 'excellent';
+    if (sameDayRate >= PERFORMANCE_THRESHOLDS.good.same_day || withinWeekRate >= PERFORMANCE_THRESHOLDS.good.within_week) return 'good';
+    if (sameDayRate >= PERFORMANCE_THRESHOLDS.needs_improvement.same_day || withinWeekRate >= PERFORMANCE_THRESHOLDS.needs_improvement.within_week) return 'needs_improvement';
+    return 'problematic';
+};
+
+const getStatusColor = (status: string) => {
+    switch (status) {
+        case 'excellent': return { bg: 'bg-green-100', text: 'text-green-800', border: 'border-green-300' };
+        case 'good': return { bg: 'bg-blue-100', text: 'text-blue-800', border: 'border-blue-300' };
+        case 'needs_improvement': return { bg: 'bg-yellow-100', text: 'text-yellow-800', border: 'border-yellow-300' };
+        case 'problematic': return { bg: 'bg-red-100', text: 'text-red-800', border: 'border-red-300' };
+        default: return { bg: 'bg-slate-100', text: 'text-slate-800', border: 'border-slate-300' };
+    }
+};
+
+const getStatusLabel = (status: string) => {
+    switch (status) {
+        case 'excellent': return '🌟 Excellent';
+        case 'good': return '✅ Good';
+        case 'needs_improvement': return '⚠️ Needs Improvement';
+        case 'problematic': return '🔴 Problematic';
+        default: return status;
+    }
+};
 
 // --- Component ---
 export default function TrendingView() {
@@ -146,6 +203,19 @@ export default function TrendingView() {
     const [viewMode, setViewMode] = useState<'table' | 'chart'>('chart');
     const [selectedWeeks, setSelectedWeeks] = useState<number[]>([]);
     const [chartMetric, setChartMetric] = useState<'same_day_rate' | 'within_week_rate'>('same_day_rate');
+
+    // New: Entity-wise trending data
+    const [areaWeeklyTrends, setAreaWeeklyTrends] = useState<EntityWeeklyTrend[]>([]);
+    const [nfoWeeklyTrends, setNfoWeeklyTrends] = useState<EntityWeeklyTrend[]>([]);
+    
+    // Slicer selections for chart
+    const [selectedAreasForChart, setSelectedAreasForChart] = useState<string[]>([]);
+    const [selectedNFOsForChart, setSelectedNFOsForChart] = useState<string[]>([]);
+    const [chartViewMode, setChartViewMode] = useState<'overall' | 'area' | 'nfo' | 'comparison'>('overall');
+    const [performanceFilter, setPerformanceFilter] = useState<'all' | 'excellent' | 'good' | 'needs_improvement' | 'problematic'>('all');
+    
+    // Highlighted entity for focus (when clicking legend or slicer)
+    const [highlightedEntity, setHighlightedEntity] = useState<string | null>(null);
 
     const updateUrlParams = useCallback((updates: Record<string, string>) => {
         setParams(router, pathname, searchParams, updates);
@@ -228,7 +298,7 @@ export default function TrendingView() {
             }) as PMRRecord[];
 
             if (filteredPMRs.length === 0) {
-                setNfoPerformance([]); setWeeklyTrends([]); setLoading(false); return;
+                setNfoPerformance([]); setWeeklyTrends([]); setAreaWeeklyTrends([]); setNfoWeeklyTrends([]); setLoading(false); return;
             }
 
             // 2. Collect site IDs (use W-format to match inventory)
@@ -307,6 +377,10 @@ export default function TrendingView() {
             // 5. Process each PMR and calculate timing
             const nfoMap = new Map<string, NFOPerformanceData>();
             const weekMap = new Map<number, WeeklyTrend>();
+            
+            // New: Track weekly data by Area and NFO
+            const areaWeekMap = new Map<string, Map<number, { total: number; same_day: number; next_day: number; within_week: number; late: number; no_submission: number }>>();
+            const nfoWeekMap = new Map<string, { city: string; weeks: Map<number, { total: number; same_day: number; next_day: number; within_week: number; late: number; no_submission: number }> }>();
 
             filteredPMRs.forEach(pmr => {
                 const fmeName = pmr['FME Name'] || 'Unknown';
@@ -356,32 +430,66 @@ export default function TrendingView() {
                 // Check submission status
                 const siteSubmission = findSubmissionForSite(pmr.Site_ID_1, pmr.Site_ID);
                 
+                // Determine submission category
+                let submissionCategory: 'same_day' | 'next_day' | 'within_week' | 'late' | 'no_submission' = 'no_submission';
+                
                 if (siteSubmission?.isSubmitted && siteSubmission.latestUpdateDate) {
                     // Site is submitted - calculate delay
                     const daysDelay = daysDifference(pmrDate, siteSubmission.latestUpdateDate);
                     
                     if (daysDelay <= 0) { 
-                        // Same Day (submitted on or before PMR date)
+                        submissionCategory = 'same_day';
                         nfoData.same_day_submissions++; 
                         weekData.same_day_count++; 
                     } else if (daysDelay === 1) { 
-                        // Next Day (1 day after PMR)
+                        submissionCategory = 'next_day';
                         nfoData.next_day_submissions++; 
                         weekData.next_day_count++; 
                     } else if (daysDelay <= 7) { 
-                        // Within Week (2-7 days after PMR)
+                        submissionCategory = 'within_week';
                         nfoData.within_week_submissions++; 
                         weekData.within_week_count++; 
                     } else { 
-                        // Late (>7 days)
+                        submissionCategory = 'late';
                         nfoData.late_submissions++; 
                         weekData.late_count++; 
                     }
                 } else { 
-                    // Not submitted (not 100% complete or no inventory)
                     nfoData.no_submission++; 
                     weekData.no_submission_count++; 
                 }
+                
+                // Track by Area (City)
+                if (!areaWeekMap.has(city)) {
+                    areaWeekMap.set(city, new Map());
+                }
+                const areaWeeks = areaWeekMap.get(city)!;
+                if (!areaWeeks.has(weekNum)) {
+                    areaWeeks.set(weekNum, { total: 0, same_day: 0, next_day: 0, within_week: 0, late: 0, no_submission: 0 });
+                }
+                const areaWeekData = areaWeeks.get(weekNum)!;
+                areaWeekData.total++;
+                if (submissionCategory === 'same_day') areaWeekData.same_day++;
+                else if (submissionCategory === 'next_day') areaWeekData.next_day++;
+                else if (submissionCategory === 'within_week') areaWeekData.within_week++;
+                else if (submissionCategory === 'late') areaWeekData.late++;
+                else areaWeekData.no_submission++;
+                
+                // Track by NFO
+                if (!nfoWeekMap.has(fmeName)) {
+                    nfoWeekMap.set(fmeName, { city, weeks: new Map() });
+                }
+                const nfoWeeks = nfoWeekMap.get(fmeName)!;
+                if (!nfoWeeks.weeks.has(weekNum)) {
+                    nfoWeeks.weeks.set(weekNum, { total: 0, same_day: 0, next_day: 0, within_week: 0, late: 0, no_submission: 0 });
+                }
+                const nfoWeekData = nfoWeeks.weeks.get(weekNum)!;
+                nfoWeekData.total++;
+                if (submissionCategory === 'same_day') nfoWeekData.same_day++;
+                else if (submissionCategory === 'next_day') nfoWeekData.next_day++;
+                else if (submissionCategory === 'within_week') nfoWeekData.within_week++;
+                else if (submissionCategory === 'late') nfoWeekData.late++;
+                else nfoWeekData.no_submission++;
             });
 
             // 6. Calculate rates
@@ -394,9 +502,91 @@ export default function TrendingView() {
                 }
             });
 
+            // 7. Build Area-wise weekly trends with performance status
+            const areaEntityTrends: EntityWeeklyTrend[] = [];
+            areaWeekMap.forEach((weeks, areaName) => {
+                const entityWeeks = new Map<number, { week_number: number; total_pmrs: number; same_day_count: number; next_day_count: number; within_week_count: number; late_count: number; no_submission_count: number; same_day_rate: number; within_week_rate: number }>();
+                let totalPmrs = 0, totalSameDay = 0, totalNextDay = 0, totalWithinWeek = 0;
+                
+                weeks.forEach((data, weekNum) => {
+                    const sameDayRate = data.total > 0 ? (data.same_day / data.total) * 100 : 0;
+                    const withinWeekRate = data.total > 0 ? ((data.same_day + data.next_day + data.within_week) / data.total) * 100 : 0;
+                    entityWeeks.set(weekNum, {
+                        week_number: weekNum,
+                        total_pmrs: data.total,
+                        same_day_count: data.same_day,
+                        next_day_count: data.next_day,
+                        within_week_count: data.within_week,
+                        late_count: data.late,
+                        no_submission_count: data.no_submission,
+                        same_day_rate: sameDayRate,
+                        within_week_rate: withinWeekRate
+                    });
+                    totalPmrs += data.total;
+                    totalSameDay += data.same_day;
+                    totalNextDay += data.next_day;
+                    totalWithinWeek += data.within_week;
+                });
+                
+                const avgSameDayRate = totalPmrs > 0 ? (totalSameDay / totalPmrs) * 100 : 0;
+                const avgWithinWeekRate = totalPmrs > 0 ? ((totalSameDay + totalNextDay + totalWithinWeek) / totalPmrs) * 100 : 0;
+                
+                areaEntityTrends.push({
+                    entity_name: areaName,
+                    entity_type: 'area',
+                    weeks: entityWeeks,
+                    total_pmrs: totalPmrs,
+                    avg_same_day_rate: avgSameDayRate,
+                    avg_within_week_rate: avgWithinWeekRate,
+                    performance_status: getPerformanceStatus(avgSameDayRate, avgWithinWeekRate)
+                });
+            });
+            
+            // 8. Build NFO-wise weekly trends with performance status
+            const nfoEntityTrends: EntityWeeklyTrend[] = [];
+            nfoWeekMap.forEach((nfoData, nfoName) => {
+                const entityWeeks = new Map<number, { week_number: number; total_pmrs: number; same_day_count: number; next_day_count: number; within_week_count: number; late_count: number; no_submission_count: number; same_day_rate: number; within_week_rate: number }>();
+                let totalPmrs = 0, totalSameDay = 0, totalNextDay = 0, totalWithinWeek = 0;
+                
+                nfoData.weeks.forEach((data, weekNum) => {
+                    const sameDayRate = data.total > 0 ? (data.same_day / data.total) * 100 : 0;
+                    const withinWeekRate = data.total > 0 ? ((data.same_day + data.next_day + data.within_week) / data.total) * 100 : 0;
+                    entityWeeks.set(weekNum, {
+                        week_number: weekNum,
+                        total_pmrs: data.total,
+                        same_day_count: data.same_day,
+                        next_day_count: data.next_day,
+                        within_week_count: data.within_week,
+                        late_count: data.late,
+                        no_submission_count: data.no_submission,
+                        same_day_rate: sameDayRate,
+                        within_week_rate: withinWeekRate
+                    });
+                    totalPmrs += data.total;
+                    totalSameDay += data.same_day;
+                    totalNextDay += data.next_day;
+                    totalWithinWeek += data.within_week;
+                });
+                
+                const avgSameDayRate = totalPmrs > 0 ? (totalSameDay / totalPmrs) * 100 : 0;
+                const avgWithinWeekRate = totalPmrs > 0 ? ((totalSameDay + totalNextDay + totalWithinWeek) / totalPmrs) * 100 : 0;
+                
+                nfoEntityTrends.push({
+                    entity_name: nfoName,
+                    entity_type: 'nfo',
+                    weeks: entityWeeks,
+                    total_pmrs: totalPmrs,
+                    avg_same_day_rate: avgSameDayRate,
+                    avg_within_week_rate: avgWithinWeekRate,
+                    performance_status: getPerformanceStatus(avgSameDayRate, avgWithinWeekRate)
+                });
+            });
+
             setNfoPerformance(Array.from(nfoMap.values()).sort((a, b) => b.total_pmrs - a.total_pmrs));
             setWeeklyTrends(Array.from(weekMap.values()).sort((a, b) => a.week_number - b.week_number));
             setSelectedWeeks(Array.from(weekMap.keys()).sort((a, b) => a - b));
+            setAreaWeeklyTrends(areaEntityTrends.sort((a, b) => b.total_pmrs - a.total_pmrs));
+            setNfoWeeklyTrends(nfoEntityTrends.sort((a, b) => b.total_pmrs - a.total_pmrs));
         } catch (err) {
             console.error('Error:', err);
             setError(err instanceof Error ? err.message : 'Failed to fetch data');
@@ -437,6 +627,59 @@ export default function TrendingView() {
             return { from: prevWeek.week_label, to: week.week_label, sameDayChange: week.same_day_rate - prevWeek.same_day_rate, withinWeekChange: week.within_week_rate - prevWeek.within_week_rate };
         });
     }, [selectedWeeksData]);
+
+    // Filter entity trends by performance status
+    const filteredAreaTrends = useMemo(() => {
+        let filtered = areaWeeklyTrends;
+        if (performanceFilter !== 'all') {
+            filtered = filtered.filter(a => a.performance_status === performanceFilter);
+        }
+        return filtered;
+    }, [areaWeeklyTrends, performanceFilter]);
+
+    const filteredNfoTrends = useMemo(() => {
+        let filtered = nfoWeeklyTrends;
+        if (performanceFilter !== 'all') {
+            filtered = filtered.filter(n => n.performance_status === performanceFilter);
+        }
+        return filtered;
+    }, [nfoWeeklyTrends, performanceFilter]);
+
+    // Get entities selected for chart display
+    const chartEntities = useMemo(() => {
+        const entities: EntityWeeklyTrend[] = [];
+        if (chartViewMode === 'area' || chartViewMode === 'comparison') {
+            const areasToShow = selectedAreasForChart.length > 0 
+                ? filteredAreaTrends.filter(a => selectedAreasForChart.includes(a.entity_name))
+                : filteredAreaTrends.slice(0, 5); // Default to top 5
+            entities.push(...areasToShow);
+        }
+        if (chartViewMode === 'nfo' || chartViewMode === 'comparison') {
+            const nfosToShow = selectedNFOsForChart.length > 0
+                ? filteredNfoTrends.filter(n => selectedNFOsForChart.includes(n.entity_name))
+                : filteredNfoTrends.slice(0, 5); // Default to top 5
+            entities.push(...nfosToShow);
+        }
+        return entities;
+    }, [chartViewMode, selectedAreasForChart, selectedNFOsForChart, filteredAreaTrends, filteredNfoTrends]);
+
+    // Toggle area selection for chart
+    const toggleAreaForChart = (areaName: string) => {
+        setSelectedAreasForChart(prev => 
+            prev.includes(areaName) 
+                ? prev.filter(a => a !== areaName) 
+                : [...prev, areaName]
+        );
+    };
+
+    // Toggle NFO selection for chart
+    const toggleNfoForChart = (nfoName: string) => {
+        setSelectedNFOsForChart(prev => 
+            prev.includes(nfoName) 
+                ? prev.filter(n => n !== nfoName) 
+                : [...prev, nfoName]
+        );
+    };
 
     const getMetricLabel = (metric: string) => metric === 'same_day_rate' ? 'Same Day Rate' : 'Within Week Rate (≤7 days)';
 
@@ -507,7 +750,24 @@ export default function TrendingView() {
                                         <button onClick={() => setViewMode('table')} className={`px-4 py-2 text-sm font-medium ${viewMode === 'table' ? 'bg-blue-600 text-white' : 'bg-white text-slate-700 hover:bg-slate-50'}`}>📊 Table</button>
                                     </div>
                                     {viewMode === 'chart' && <select value={chartMetric} onChange={(e) => setChartMetric(e.target.value as 'same_day_rate' | 'within_week_rate')} className="px-3 py-2 border border-slate-300 rounded-md text-sm"><option value="same_day_rate">Same Day Rate</option><option value="within_week_rate">Within Week Rate (≤7 days)</option></select>}
+                                    {viewMode === 'chart' && (
+                                        <div className="flex rounded-lg overflow-hidden border border-slate-300">
+                                            <button onClick={() => setChartViewMode('overall')} className={`px-3 py-2 text-sm ${chartViewMode === 'overall' ? 'bg-indigo-600 text-white' : 'bg-white text-slate-700 hover:bg-slate-50'}`}>Overall</button>
+                                            <button onClick={() => setChartViewMode('area')} className={`px-3 py-2 text-sm ${chartViewMode === 'area' ? 'bg-indigo-600 text-white' : 'bg-white text-slate-700 hover:bg-slate-50'}`}>Area-wise</button>
+                                            <button onClick={() => setChartViewMode('nfo')} className={`px-3 py-2 text-sm ${chartViewMode === 'nfo' ? 'bg-indigo-600 text-white' : 'bg-white text-slate-700 hover:bg-slate-50'}`}>NFO-wise</button>
+                                            <button onClick={() => setChartViewMode('comparison')} className={`px-3 py-2 text-sm ${chartViewMode === 'comparison' ? 'bg-indigo-600 text-white' : 'bg-white text-slate-700 hover:bg-slate-50'}`}>Compare</button>
+                                        </div>
+                                    )}
                                 </div>
+                                {viewMode === 'chart' && (
+                                    <select value={performanceFilter} onChange={(e) => setPerformanceFilter(e.target.value as typeof performanceFilter)} className="px-3 py-2 border border-slate-300 rounded-md text-sm">
+                                        <option value="all">All Performance</option>
+                                        <option value="excellent">🌟 Excellent Only</option>
+                                        <option value="good">✅ Good Only</option>
+                                        <option value="needs_improvement">⚠️ Needs Improvement</option>
+                                        <option value="problematic">🔴 Problematic Only</option>
+                                    </select>
+                                )}
                             </div>
                             <div>
                                 <p className="text-sm font-medium text-slate-700 mb-2">Select weeks to compare:</p>
@@ -520,54 +780,420 @@ export default function TrendingView() {
                         </div>
 
                         {viewMode === 'chart' && selectedWeeksData.length > 0 && (
-                            <div className="space-y-6">
-                                <div className="bg-white rounded-lg shadow-sm border border-slate-200 p-6">
-                                    <h3 className="text-lg font-semibold text-slate-900 mb-4">Weekly {getMetricLabel(chartMetric)} Trend</h3>
-                                    <div className="relative" style={{ height: '320px' }}>
-                                        <svg className="w-full h-full" viewBox="0 0 800 320" preserveAspectRatio="xMidYMid meet">
-                                            <defs><linearGradient id="areaGradient" x1="0%" y1="0%" x2="0%" y2="100%"><stop offset="0%" stopColor="#3b82f6" stopOpacity="0.3" /><stop offset="100%" stopColor="#3b82f6" stopOpacity="0.05" /></linearGradient></defs>
-                                            {[0, 25, 50, 75, 100].map(val => <g key={val}><line x1="60" y1={260 - val * 2.2} x2="780" y2={260 - val * 2.2} stroke="#e2e8f0" strokeWidth="1" /><text x="50" y={265 - val * 2.2} textAnchor="end" className="text-xs fill-slate-500">{val}%</text></g>)}
-                                            {selectedWeeksData.length > 1 && <path d={`M ${60} ${260 - selectedWeeksData[0][chartMetric] * 2.2} ${selectedWeeksData.map((week, i) => `L ${60 + (i / (selectedWeeksData.length - 1)) * 720} ${260 - week[chartMetric] * 2.2}`).join(' ')} L ${780} 260 L 60 260 Z`} fill="url(#areaGradient)" />}
-                                            {selectedWeeksData.length > 1 && <path d={selectedWeeksData.map((week, i) => `${i === 0 ? 'M' : 'L'} ${60 + (i / (selectedWeeksData.length - 1)) * 720} ${260 - week[chartMetric] * 2.2}`).join(' ')} fill="none" stroke="#3b82f6" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round" />}
-                                            {selectedWeeksData.map((week, i) => {
-                                                const x = selectedWeeksData.length === 1 ? 420 : 60 + (i / (selectedWeeksData.length - 1)) * 720;
-                                                const y = 260 - week[chartMetric] * 2.2;
-                                                return <g key={week.week_number}><circle cx={x} cy={y} r="8" fill="#3b82f6" stroke="white" strokeWidth="3" /><text x={x} y={y - 15} textAnchor="middle" className="text-sm font-bold fill-slate-700">{week[chartMetric].toFixed(1)}%</text><text x={x} y={285} textAnchor="middle" className="text-xs fill-slate-600">{week.week_label}</text><text x={x} y={300} textAnchor="middle" className="text-xs fill-slate-400">({week.total_pmrs})</text></g>;
-                                            })}
-                                        </svg>
-                                    </div>
+                            <div className="flex gap-6">
+                                {/* Main Chart Area */}
+                                <div className="flex-1 space-y-6">
+                                    {/* Overall Trend (default view) */}
+                                    {chartViewMode === 'overall' && (
+                                        <div className="bg-white rounded-lg shadow-sm border border-slate-200 p-6">
+                                            <h3 className="text-lg font-semibold text-slate-900 mb-4">Weekly {getMetricLabel(chartMetric)} Trend</h3>
+                                            <div className="relative" style={{ height: '320px' }}>
+                                                <svg className="w-full h-full" viewBox="0 0 800 320" preserveAspectRatio="xMidYMid meet">
+                                                    <defs><linearGradient id="areaGradient" x1="0%" y1="0%" x2="0%" y2="100%"><stop offset="0%" stopColor="#3b82f6" stopOpacity="0.3" /><stop offset="100%" stopColor="#3b82f6" stopOpacity="0.05" /></linearGradient></defs>
+                                                    {[0, 25, 50, 75, 100].map(val => <g key={val}><line x1="60" y1={260 - val * 2.2} x2="780" y2={260 - val * 2.2} stroke="#e2e8f0" strokeWidth="1" /><text x="50" y={265 - val * 2.2} textAnchor="end" className="text-xs fill-slate-500">{val}%</text></g>)}
+                                                    {selectedWeeksData.length > 1 && <path d={`M ${60} ${260 - selectedWeeksData[0][chartMetric] * 2.2} ${selectedWeeksData.map((week, i) => `L ${60 + (i / (selectedWeeksData.length - 1)) * 720} ${260 - week[chartMetric] * 2.2}`).join(' ')} L ${780} 260 L 60 260 Z`} fill="url(#areaGradient)" />}
+                                                    {selectedWeeksData.length > 1 && <path d={selectedWeeksData.map((week, i) => `${i === 0 ? 'M' : 'L'} ${60 + (i / (selectedWeeksData.length - 1)) * 720} ${260 - week[chartMetric] * 2.2}`).join(' ')} fill="none" stroke="#3b82f6" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round" />}
+                                                    {selectedWeeksData.map((week, i) => {
+                                                        const x = selectedWeeksData.length === 1 ? 420 : 60 + (i / (selectedWeeksData.length - 1)) * 720;
+                                                        const y = 260 - week[chartMetric] * 2.2;
+                                                        return <g key={week.week_number}><circle cx={x} cy={y} r="8" fill="#3b82f6" stroke="white" strokeWidth="3" /><text x={x} y={y - 15} textAnchor="middle" className="text-sm font-bold fill-slate-700">{week[chartMetric].toFixed(1)}%</text><text x={x} y={285} textAnchor="middle" className="text-xs fill-slate-600">{week.week_label}</text><text x={x} y={300} textAnchor="middle" className="text-xs fill-slate-400">({week.total_pmrs})</text></g>;
+                                                    })}
+                                                </svg>
+                                            </div>
+                                        </div>
+                                    )}
+
+                                    {/* Area-wise or NFO-wise or Comparison Multi-line Chart */}
+                                    {(chartViewMode === 'area' || chartViewMode === 'nfo' || chartViewMode === 'comparison') && chartEntities.length > 0 && (
+                                        <div className="bg-white rounded-lg shadow-sm border border-slate-200 p-6">
+                                            <h3 className="text-lg font-semibold text-slate-900 mb-4">
+                                                {chartViewMode === 'area' ? 'Area-wise' : chartViewMode === 'nfo' ? 'NFO-wise' : 'Area & NFO Comparison'} {getMetricLabel(chartMetric)} Trend
+                                            </h3>
+                                            <div className="relative" style={{ height: '400px' }}>
+                                                <svg className="w-full h-full" viewBox="0 0 800 400" preserveAspectRatio="xMidYMid meet">
+                                                    {/* Grid lines */}
+                                                    {[0, 25, 50, 75, 100].map(val => (
+                                                        <g key={val}>
+                                                            <line x1="60" y1={340 - val * 3} x2="750" y2={340 - val * 3} stroke="#e2e8f0" strokeWidth="1" />
+                                                            <text x="50" y={345 - val * 3} textAnchor="end" className="text-xs fill-slate-500">{val}%</text>
+                                                        </g>
+                                                    ))}
+                                                    
+                                                    {/* Draw line for each entity */}
+                                                    {chartEntities.map((entity, entityIdx) => {
+                                                        const color = CHART_COLORS[entityIdx % CHART_COLORS.length];
+                                                        const weekNums = selectedWeeks.sort((a, b) => a - b);
+                                                        const points: { x: number; y: number; rate: number; weekNum: number }[] = [];
+                                                        
+                                                        weekNums.forEach((weekNum, weekIdx) => {
+                                                            const weekData = entity.weeks.get(weekNum);
+                                                            if (weekData) {
+                                                                const rate = chartMetric === 'same_day_rate' ? weekData.same_day_rate : weekData.within_week_rate;
+                                                                const x = weekNums.length === 1 ? 400 : 60 + (weekIdx / (weekNums.length - 1)) * 690;
+                                                                const y = 340 - rate * 3;
+                                                                points.push({ x, y, rate, weekNum });
+                                                            }
+                                                        });
+                                                        
+                                                        if (points.length === 0) return null;
+                                                        
+                                                        // Calculate opacity based on highlight state
+                                                        const isHighlighted = highlightedEntity === entity.entity_name;
+                                                        const isDimmed = highlightedEntity !== null && !isHighlighted;
+                                                        const opacity = isDimmed ? 0.15 : 1;
+                                                        const strokeWidth = isHighlighted ? 4 : 2.5;
+                                                        const pointRadius = isHighlighted ? 7 : 5;
+                                                        
+                                                        return (
+                                                            <g 
+                                                                key={entity.entity_name} 
+                                                                style={{ opacity, transition: 'opacity 0.2s ease' }}
+                                                                className="cursor-pointer"
+                                                                onClick={() => setHighlightedEntity(isHighlighted ? null : entity.entity_name)}
+                                                            >
+                                                                {/* Line */}
+                                                                {points.length > 1 && (
+                                                                    <path
+                                                                        d={points.map((p, i) => `${i === 0 ? 'M' : 'L'} ${p.x} ${p.y}`).join(' ')}
+                                                                        fill="none"
+                                                                        stroke={color}
+                                                                        strokeWidth={strokeWidth}
+                                                                        strokeLinecap="round"
+                                                                        strokeLinejoin="round"
+                                                                        strokeDasharray={entity.entity_type === 'nfo' ? '5,3' : '0'}
+                                                                    />
+                                                                )}
+                                                                {/* Points with values on highlight */}
+                                                                {points.map((p, i) => (
+                                                                    <g key={i}>
+                                                                        <circle cx={p.x} cy={p.y} r={pointRadius} fill={color} stroke="white" strokeWidth="2" />
+                                                                        {isHighlighted && (
+                                                                            <text x={p.x} y={p.y - 12} textAnchor="middle" className="text-xs font-bold" fill={color}>
+                                                                                {p.rate.toFixed(0)}%
+                                                                            </text>
+                                                                        )}
+                                                                    </g>
+                                                                ))}
+                                                            </g>
+                                                        );
+                                                    })}
+                                                    
+                                                    {/* X-axis labels (weeks) */}
+                                                    {selectedWeeks.sort((a, b) => a - b).map((weekNum, i) => {
+                                                        const x = selectedWeeks.length === 1 ? 400 : 60 + (i / (selectedWeeks.length - 1)) * 690;
+                                                        const weekLabel = weekNum === 0 ? 'Pre-Week' : `Week ${weekNum}`;
+                                                        return (
+                                                            <text key={weekNum} x={x} y={365} textAnchor="middle" className="text-xs fill-slate-600">
+                                                                {weekLabel}
+                                                            </text>
+                                                        );
+                                                    })}
+                                                </svg>
+                                            </div>
+                                            
+                                            {/* Legend - Clickable */}
+                                            <div className="mt-4 flex flex-wrap gap-2 border-t pt-4">
+                                                {chartEntities.map((entity, idx) => {
+                                                    const color = CHART_COLORS[idx % CHART_COLORS.length];
+                                                    const statusColors = getStatusColor(entity.performance_status);
+                                                    const isHighlighted = highlightedEntity === entity.entity_name;
+                                                    const isDimmed = highlightedEntity !== null && !isHighlighted;
+                                                    return (
+                                                        <button 
+                                                            key={entity.entity_name} 
+                                                            onClick={() => setHighlightedEntity(isHighlighted ? null : entity.entity_name)}
+                                                            className={`flex items-center gap-2 px-2 py-1.5 rounded border-2 transition-all cursor-pointer hover:scale-105 ${
+                                                                isHighlighted 
+                                                                    ? 'ring-2 ring-offset-1 shadow-md' 
+                                                                    : isDimmed 
+                                                                        ? 'opacity-40' 
+                                                                        : 'hover:shadow-sm'
+                                                            } ${statusColors.bg}`}
+                                                            style={{ 
+                                                                borderColor: isHighlighted ? color : 'transparent',
+                                                                outlineColor: isHighlighted ? color : 'transparent'
+                                                            }}
+                                                        >
+                                                            <div 
+                                                                className="w-4 h-1 flex-shrink-0" 
+                                                                style={{ 
+                                                                    backgroundColor: entity.entity_type === 'nfo' ? 'transparent' : color,
+                                                                    borderBottom: entity.entity_type === 'nfo' ? `3px dashed ${color}` : 'none',
+                                                                    height: entity.entity_type === 'nfo' ? '0' : '4px'
+                                                                }}
+                                                            />
+                                                            <span className={`text-xs font-medium ${statusColors.text} truncate max-w-[120px]`}>
+                                                                {entity.entity_name}
+                                                            </span>
+                                                            <span className="text-xs" style={{ color }}>
+                                                                {entity.entity_type === 'area' ? '📍' : '👤'}
+                                                            </span>
+                                                            <span className="text-xs font-bold" style={{ color }}>
+                                                                {(chartMetric === 'same_day_rate' ? entity.avg_same_day_rate : entity.avg_within_week_rate).toFixed(0)}%
+                                                            </span>
+                                                        </button>
+                                                    );
+                                                })}
+                                                {highlightedEntity && (
+                                                    <button 
+                                                        onClick={() => setHighlightedEntity(null)}
+                                                        className="flex items-center gap-1 px-3 py-1.5 rounded bg-slate-200 hover:bg-slate-300 text-slate-700 text-xs font-medium"
+                                                    >
+                                                        ✕ Clear Focus
+                                                    </button>
+                                                )}
+                                            </div>
+                                            <div className="mt-2 text-xs text-slate-500">
+                                                <span className="mr-4">━ Solid = Area</span>
+                                                <span className="mr-4">┄ Dashed = NFO</span>
+                                                <span className="text-blue-600">💡 Click legend or line to focus</span>
+                                            </div>
+                                        </div>
+                                    )}
+
+                                    {(chartViewMode === 'area' || chartViewMode === 'nfo' || chartViewMode === 'comparison') && chartEntities.length === 0 && (
+                                        <div className="bg-white rounded-lg shadow-sm border border-slate-200 p-10 text-center">
+                                            <p className="text-slate-500">Select areas or NFOs from the slicer panel on the right to see trends.</p>
+                                        </div>
+                                    )}
+
+                                    {weekChanges.length > 0 && chartViewMode === 'overall' && (
+                                        <div className="bg-white rounded-lg shadow-sm border border-slate-200 p-6">
+                                            <h3 className="text-lg font-semibold text-slate-900 mb-4">Week-over-Week Change</h3>
+                                            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+                                                {weekChanges.map((change, idx) => (
+                                                    <div key={idx} className="bg-slate-50 rounded-lg p-4">
+                                                        <p className="text-sm text-slate-600 mb-2">{change.from} → {change.to}</p>
+                                                        <div className="flex items-center gap-4">
+                                                            <div><p className="text-xs text-slate-500">Same Day</p><p className={`text-lg font-bold ${change.sameDayChange >= 0 ? 'text-green-600' : 'text-red-600'}`}>{change.sameDayChange >= 0 ? '↑' : '↓'} {Math.abs(change.sameDayChange).toFixed(1)}%</p></div>
+                                                            <div><p className="text-xs text-slate-500">Within Week</p><p className={`text-lg font-bold ${change.withinWeekChange >= 0 ? 'text-green-600' : 'text-red-600'}`}>{change.withinWeekChange >= 0 ? '↑' : '↓'} {Math.abs(change.withinWeekChange).toFixed(1)}%</p></div>
+                                                        </div>
+                                                    </div>
+                                                ))}
+                                            </div>
+                                        </div>
+                                    )}
+
+                                    {chartViewMode === 'overall' && (
+                                        <div className="bg-white rounded-lg shadow-sm border border-slate-200 p-6">
+                                            <h3 className="text-lg font-semibold text-slate-900 mb-4">Week Comparison</h3>
+                                            <div className="space-y-4">
+                                                {selectedWeeksData.map((week, idx) => (
+                                                    <div key={week.week_number} className="flex items-center gap-4">
+                                                        <div className="w-20 text-sm font-medium text-slate-700">{week.week_label}</div>
+                                                        <div className="flex-1"><div className="h-8 bg-slate-100 rounded-full overflow-hidden relative"><div className="absolute h-full bg-blue-200 rounded-full" style={{ width: `${week.within_week_rate}%` }} /><div className="absolute h-full rounded-full" style={{ width: `${week.same_day_rate}%`, backgroundColor: CHART_COLORS[idx % CHART_COLORS.length] }} /></div></div>
+                                                        <div className="w-32 text-right"><span className="text-sm font-bold" style={{ color: CHART_COLORS[idx % CHART_COLORS.length] }}>{week.same_day_rate.toFixed(1)}%</span><span className="text-slate-400 mx-1">/</span><span className="text-sm text-blue-600">{week.within_week_rate.toFixed(1)}%</span></div>
+                                                    </div>
+                                                ))}
+                                            </div>
+                                            <div className="mt-4 flex gap-6 text-sm"><div className="flex items-center gap-2"><div className="w-4 h-4 bg-blue-500 rounded"></div><span>Same Day</span></div><div className="flex items-center gap-2"><div className="w-4 h-4 bg-blue-200 rounded"></div><span>Within Week (≤7 days)</span></div></div>
+                                        </div>
+                                    )}
+                                    
+                                    {/* Performance Summary Cards for Area/NFO view */}
+                                    {(chartViewMode === 'area' || chartViewMode === 'nfo' || chartViewMode === 'comparison') && (
+                                        <div className="bg-white rounded-lg shadow-sm border border-slate-200 p-6">
+                                            <h3 className="text-lg font-semibold text-slate-900 mb-4">Performance Summary</h3>
+                                            <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mb-4">
+                                                <div className="bg-green-50 border border-green-200 rounded-lg p-3 text-center">
+                                                    <p className="text-2xl font-bold text-green-700">{(chartViewMode === 'nfo' ? filteredNfoTrends : chartViewMode === 'area' ? filteredAreaTrends : [...filteredAreaTrends, ...filteredNfoTrends]).filter(e => e.performance_status === 'excellent').length}</p>
+                                                    <p className="text-xs text-green-600">🌟 Excellent</p>
+                                                </div>
+                                                <div className="bg-blue-50 border border-blue-200 rounded-lg p-3 text-center">
+                                                    <p className="text-2xl font-bold text-blue-700">{(chartViewMode === 'nfo' ? filteredNfoTrends : chartViewMode === 'area' ? filteredAreaTrends : [...filteredAreaTrends, ...filteredNfoTrends]).filter(e => e.performance_status === 'good').length}</p>
+                                                    <p className="text-xs text-blue-600">✅ Good</p>
+                                                </div>
+                                                <div className="bg-yellow-50 border border-yellow-200 rounded-lg p-3 text-center">
+                                                    <p className="text-2xl font-bold text-yellow-700">{(chartViewMode === 'nfo' ? filteredNfoTrends : chartViewMode === 'area' ? filteredAreaTrends : [...filteredAreaTrends, ...filteredNfoTrends]).filter(e => e.performance_status === 'needs_improvement').length}</p>
+                                                    <p className="text-xs text-yellow-600">⚠️ Needs Work</p>
+                                                </div>
+                                                <div className="bg-red-50 border border-red-200 rounded-lg p-3 text-center">
+                                                    <p className="text-2xl font-bold text-red-700">{(chartViewMode === 'nfo' ? filteredNfoTrends : chartViewMode === 'area' ? filteredAreaTrends : [...filteredAreaTrends, ...filteredNfoTrends]).filter(e => e.performance_status === 'problematic').length}</p>
+                                                    <p className="text-xs text-red-600">🔴 Problematic</p>
+                                                </div>
+                                            </div>
+                                            <div className="text-xs text-slate-500 bg-slate-50 p-2 rounded">
+                                                <strong>Criteria:</strong> Excellent (≥80% same-day OR ≥95% within-week) • Good (≥60% OR ≥85%) • Needs Improvement (≥40% OR ≥70%) • Problematic (below thresholds)
+                                            </div>
+                                        </div>
+                                    )}
                                 </div>
 
-                                {weekChanges.length > 0 && (
-                                    <div className="bg-white rounded-lg shadow-sm border border-slate-200 p-6">
-                                        <h3 className="text-lg font-semibold text-slate-900 mb-4">Week-over-Week Change</h3>
-                                        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-                                            {weekChanges.map((change, idx) => (
-                                                <div key={idx} className="bg-slate-50 rounded-lg p-4">
-                                                    <p className="text-sm text-slate-600 mb-2">{change.from} → {change.to}</p>
-                                                    <div className="flex items-center gap-4">
-                                                        <div><p className="text-xs text-slate-500">Same Day</p><p className={`text-lg font-bold ${change.sameDayChange >= 0 ? 'text-green-600' : 'text-red-600'}`}>{change.sameDayChange >= 0 ? '↑' : '↓'} {Math.abs(change.sameDayChange).toFixed(1)}%</p></div>
-                                                        <div><p className="text-xs text-slate-500">Within Week</p><p className={`text-lg font-bold ${change.withinWeekChange >= 0 ? 'text-green-600' : 'text-red-600'}`}>{change.withinWeekChange >= 0 ? '↑' : '↓'} {Math.abs(change.withinWeekChange).toFixed(1)}%</p></div>
+                                {/* Right Side Slicer Panel */}
+                                {(chartViewMode === 'area' || chartViewMode === 'nfo' || chartViewMode === 'comparison') && (
+                                    <div className="w-72 flex-shrink-0 space-y-4">
+                                        {/* Area Slicer */}
+                                        {(chartViewMode === 'area' || chartViewMode === 'comparison') && (
+                                            <div className="bg-white rounded-lg shadow-sm border border-slate-200 p-4">
+                                                <div className="flex items-center justify-between mb-3">
+                                                    <h4 className="font-semibold text-slate-900 text-sm">📍 Areas ({filteredAreaTrends.length})</h4>
+                                                    <div className="flex gap-1">
+                                                        <button 
+                                                            onClick={() => setSelectedAreasForChart(filteredAreaTrends.map(a => a.entity_name))}
+                                                            className="text-xs px-2 py-1 bg-slate-100 hover:bg-slate-200 rounded"
+                                                        >All</button>
+                                                        <button 
+                                                            onClick={() => { setSelectedAreasForChart([]); setHighlightedEntity(null); }}
+                                                            className="text-xs px-2 py-1 bg-slate-100 hover:bg-slate-200 rounded"
+                                                        >Clear</button>
                                                     </div>
                                                 </div>
-                                            ))}
+                                                <div className="max-h-48 overflow-y-auto space-y-1">
+                                                    {filteredAreaTrends.map((area, idx) => {
+                                                        const statusColors = getStatusColor(area.performance_status);
+                                                        const isSelected = selectedAreasForChart.includes(area.entity_name);
+                                                        const isHighlighted = highlightedEntity === area.entity_name;
+                                                        const color = CHART_COLORS[idx % CHART_COLORS.length];
+                                                        return (
+                                                            <div 
+                                                                key={area.entity_name} 
+                                                                className={`flex items-center gap-2 p-2 rounded cursor-pointer transition-all ${
+                                                                    isHighlighted 
+                                                                        ? 'shadow-md scale-[1.02]' 
+                                                                        : isSelected 
+                                                                            ? 'bg-blue-50 border border-blue-200' 
+                                                                            : 'hover:bg-slate-50'
+                                                                }`}
+                                                                style={{ 
+                                                                    border: isHighlighted ? `2px solid ${color}` : undefined,
+                                                                    boxShadow: isHighlighted ? `0 0 0 2px ${color}40` : undefined,
+                                                                    backgroundColor: isHighlighted ? `${color}15` : undefined
+                                                                }}
+                                                            >
+                                                                <input
+                                                                    type="checkbox"
+                                                                    checked={isSelected}
+                                                                    onChange={() => toggleAreaForChart(area.entity_name)}
+                                                                    className="rounded border-slate-300 text-blue-600 focus:ring-blue-500"
+                                                                />
+                                                                <div 
+                                                                    className="w-3 h-3 rounded-full flex-shrink-0" 
+                                                                    style={{ backgroundColor: color }}
+                                                                />
+                                                                <div 
+                                                                    className="flex-1 min-w-0"
+                                                                    onClick={() => {
+                                                                        if (isSelected) {
+                                                                            setHighlightedEntity(isHighlighted ? null : area.entity_name);
+                                                                        }
+                                                                    }}
+                                                                >
+                                                                    <p className={`text-xs font-medium truncate ${isHighlighted ? 'text-slate-900' : 'text-slate-700'}`}>{area.entity_name}</p>
+                                                                    <p className={`text-xs ${statusColors.text}`}>{area.avg_same_day_rate.toFixed(0)}% same-day</p>
+                                                                </div>
+                                                                <span className={`text-xs px-1.5 py-0.5 rounded ${statusColors.bg} ${statusColors.text}`}>
+                                                                    {area.performance_status === 'excellent' ? '🌟' : area.performance_status === 'good' ? '✅' : area.performance_status === 'needs_improvement' ? '⚠️' : '🔴'}
+                                                                </span>
+                                                            </div>
+                                                        );
+                                                    })}
+                                                </div>
+                                            </div>
+                                        )}
+
+                                        {/* NFO Slicer */}
+                                        {(chartViewMode === 'nfo' || chartViewMode === 'comparison') && (
+                                            <div className="bg-white rounded-lg shadow-sm border border-slate-200 p-4">
+                                                <div className="flex items-center justify-between mb-3">
+                                                    <h4 className="font-semibold text-slate-900 text-sm">👤 NFOs ({filteredNfoTrends.length})</h4>
+                                                    <div className="flex gap-1">
+                                                        <button 
+                                                            onClick={() => setSelectedNFOsForChart(filteredNfoTrends.slice(0, 10).map(n => n.entity_name))}
+                                                            className="text-xs px-2 py-1 bg-slate-100 hover:bg-slate-200 rounded"
+                                                        >Top 10</button>
+                                                        <button 
+                                                            onClick={() => { setSelectedNFOsForChart([]); setHighlightedEntity(null); }}
+                                                            className="text-xs px-2 py-1 bg-slate-100 hover:bg-slate-200 rounded"
+                                                        >Clear</button>
+                                                    </div>
+                                                </div>
+                                                <div className="max-h-64 overflow-y-auto space-y-1">
+                                                    {filteredNfoTrends.map((nfo, idx) => {
+                                                        const statusColors = getStatusColor(nfo.performance_status);
+                                                        const isSelected = selectedNFOsForChart.includes(nfo.entity_name);
+                                                        const isHighlighted = highlightedEntity === nfo.entity_name;
+                                                        const color = CHART_COLORS[idx % CHART_COLORS.length];
+                                                        return (
+                                                            <div 
+                                                                key={nfo.entity_name} 
+                                                                className={`flex items-center gap-2 p-2 rounded cursor-pointer transition-all ${
+                                                                    isHighlighted 
+                                                                        ? 'shadow-md scale-[1.02]' 
+                                                                        : isSelected 
+                                                                            ? 'bg-indigo-50 border border-indigo-200' 
+                                                                            : 'hover:bg-slate-50'
+                                                                }`}
+                                                                style={{ 
+                                                                    border: isHighlighted ? `2px solid ${color}` : undefined,
+                                                                    boxShadow: isHighlighted ? `0 0 0 2px ${color}40` : undefined,
+                                                                    backgroundColor: isHighlighted ? `${color}15` : undefined
+                                                                }}
+                                                            >
+                                                                <input
+                                                                    type="checkbox"
+                                                                    checked={isSelected}
+                                                                    onChange={() => toggleNfoForChart(nfo.entity_name)}
+                                                                    className="rounded border-slate-300 text-indigo-600 focus:ring-indigo-500"
+                                                                />
+                                                                <div 
+                                                                    className="w-3 h-3 rounded-full flex-shrink-0 border-2 border-dashed" 
+                                                                    style={{ borderColor: color }}
+                                                                />
+                                                                <div 
+                                                                    className="flex-1 min-w-0"
+                                                                    onClick={() => {
+                                                                        if (isSelected) {
+                                                                            setHighlightedEntity(isHighlighted ? null : nfo.entity_name);
+                                                                        }
+                                                                    }}
+                                                                >
+                                                                    <p className={`text-xs font-medium truncate ${isHighlighted ? 'text-slate-900' : 'text-slate-700'}`}>{nfo.entity_name}</p>
+                                                                    <p className={`text-xs ${statusColors.text}`}>{nfo.avg_same_day_rate.toFixed(0)}% same-day</p>
+                                                                </div>
+                                                                <span className={`text-xs px-1.5 py-0.5 rounded ${statusColors.bg} ${statusColors.text}`}>
+                                                                    {nfo.performance_status === 'excellent' ? '🌟' : nfo.performance_status === 'good' ? '✅' : nfo.performance_status === 'needs_improvement' ? '⚠️' : '🔴'}
+                                                                </span>
+                                                            </div>
+                                                        );
+                                                    })}
+                                                </div>
+                                            </div>
+                                        )}
+
+                                        {/* Quick Actions */}
+                                        <div className="bg-slate-50 rounded-lg p-3 border border-slate-200">
+                                            <p className="text-xs font-medium text-slate-700 mb-2">Quick Select:</p>
+                                            <div className="space-y-1">
+                                                <button 
+                                                    onClick={() => {
+                                                        if (chartViewMode === 'area' || chartViewMode === 'comparison') {
+                                                            setSelectedAreasForChart(filteredAreaTrends.filter(a => a.performance_status === 'problematic').map(a => a.entity_name));
+                                                        }
+                                                        if (chartViewMode === 'nfo' || chartViewMode === 'comparison') {
+                                                            setSelectedNFOsForChart(filteredNfoTrends.filter(n => n.performance_status === 'problematic').map(n => n.entity_name));
+                                                        }
+                                                    }}
+                                                    className="w-full text-xs px-2 py-1.5 bg-red-100 hover:bg-red-200 text-red-700 rounded"
+                                                >
+                                                    🔴 Show Problematic Only
+                                                </button>
+                                                <button 
+                                                    onClick={() => {
+                                                        if (chartViewMode === 'area' || chartViewMode === 'comparison') {
+                                                            setSelectedAreasForChart(filteredAreaTrends.filter(a => a.performance_status === 'excellent').map(a => a.entity_name));
+                                                        }
+                                                        if (chartViewMode === 'nfo' || chartViewMode === 'comparison') {
+                                                            setSelectedNFOsForChart(filteredNfoTrends.filter(n => n.performance_status === 'excellent').map(n => n.entity_name));
+                                                        }
+                                                    }}
+                                                    className="w-full text-xs px-2 py-1.5 bg-green-100 hover:bg-green-200 text-green-700 rounded"
+                                                >
+                                                    🌟 Show Top Performers
+                                                </button>
+                                            </div>
                                         </div>
                                     </div>
                                 )}
-
-                                <div className="bg-white rounded-lg shadow-sm border border-slate-200 p-6">
-                                    <h3 className="text-lg font-semibold text-slate-900 mb-4">Week Comparison</h3>
-                                    <div className="space-y-4">
-                                        {selectedWeeksData.map((week, idx) => (
-                                            <div key={week.week_number} className="flex items-center gap-4">
-                                                <div className="w-20 text-sm font-medium text-slate-700">{week.week_label}</div>
-                                                <div className="flex-1"><div className="h-8 bg-slate-100 rounded-full overflow-hidden relative"><div className="absolute h-full bg-blue-200 rounded-full" style={{ width: `${week.within_week_rate}%` }} /><div className="absolute h-full rounded-full" style={{ width: `${week.same_day_rate}%`, backgroundColor: CHART_COLORS[idx % CHART_COLORS.length] }} /></div></div>
-                                                <div className="w-32 text-right"><span className="text-sm font-bold" style={{ color: CHART_COLORS[idx % CHART_COLORS.length] }}>{week.same_day_rate.toFixed(1)}%</span><span className="text-slate-400 mx-1">/</span><span className="text-sm text-blue-600">{week.within_week_rate.toFixed(1)}%</span></div>
-                                            </div>
-                                        ))}
-                                    </div>
-                                    <div className="mt-4 flex gap-6 text-sm"><div className="flex items-center gap-2"><div className="w-4 h-4 bg-blue-500 rounded"></div><span>Same Day</span></div><div className="flex items-center gap-2"><div className="w-4 h-4 bg-blue-200 rounded"></div><span>Within Week (≤7 days)</span></div></div>
-                                </div>
                             </div>
                         )}
 
