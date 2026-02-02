@@ -78,14 +78,16 @@ export default function PMRView() {
         }
     }, [searchParams]);
 
-    // Convert YYYY-MM-DD to D-Mon-YY format (e.g., "2026-01-29" -> "29-Jan-26")
+    // Convert YYYY-MM-DD to DD-Mon-YY format (e.g., "2026-01-29" -> "29-Jan-26", "2026-02-01" -> "01-Feb-26")
     const formatDateForQuery = (isoDate: string): string => {
         const months = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
         const [year, month, day] = isoDate.split('-');
-        const dayNum = parseInt(day, 10); // Remove leading zero
+        const dayNum = parseInt(day, 10);
+        // Keep leading zero for single-digit days (01-09) to match database format
+        const dayStr = dayNum < 10 ? `0${dayNum}` : `${dayNum}`;
         const monthName = months[parseInt(month, 10) - 1];
         const shortYear = year.slice(-2);
-        return `${dayNum}-${monthName}-${shortYear}`;
+        return `${dayStr}-${monthName}-${shortYear}`;
     };
 
     const fetchData = useCallback(async () => {

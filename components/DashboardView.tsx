@@ -212,6 +212,7 @@ export default function DashboardView() {
     // GPS compliance data from fo_database (loaded once)
     const [foTechData, setFoTechData] = useState<Map<string, { region: string; technologies: Set<string> }>>(new Map());
     const [gpsEntrySites, setGpsEntrySites] = useState<Set<string>>(new Set());
+    const [gpsDataLoaded, setGpsDataLoaded] = useState(false); // Track if GPS entries have been loaded
 
     // Helper to normalize site_id: strip leading zeros after W
     // W0001 -> W1, W2048 -> W2048
@@ -264,18 +265,38 @@ export default function DashboardView() {
                 setFoTechData(siteDataMap);
 
                 // Get sites that have RAN-Passive GPS System entries (normalize IDs)
-                // Use range to avoid default 1000 row limit
-                const { data: gpsEntries } = await supabase
-                    .from('main_inventory')
-                    .select('site_id')
-                    .eq('category', 'RAN-Passive')
-                    .eq('equipment_type', 'GPS System')
-                    .range(0, 10000);
+                // Use pagination to avoid default 1000 row limit
+                let allGpsEntries: { site_id: string }[] = [];
+                let gpsOffset = 0;
+                const gpsBatchSize = 1000;
+                
+                while (true) {
+                    const { data: gpsBatch, error: gpsError } = await supabase
+                        .from('main_inventory')
+                        .select('site_id')
+                        .eq('category', 'RAN-Passive')
+                        .eq('equipment_type', 'GPS System')
+                        .range(gpsOffset, gpsOffset + gpsBatchSize - 1);
+                    
+                    if (gpsError) {
+                        console.error('[GPS] Fetch error:', gpsError);
+                        break;
+                    }
+                    if (!gpsBatch || gpsBatch.length === 0) break;
+                    
+                    allGpsEntries = allGpsEntries.concat(gpsBatch);
+                    
+                    if (gpsBatch.length < gpsBatchSize) break; // Last batch
+                    gpsOffset += gpsBatchSize;
+                }
 
                 // Normalize GPS site IDs for matching
-                setGpsEntrySites(new Set(gpsEntries?.map(g => normalizeSiteId(g.site_id)) || []));
+                const gpsSet = new Set(allGpsEntries.map(g => normalizeSiteId(g.site_id)));
+                setGpsEntrySites(gpsSet);
+                setGpsDataLoaded(true);
             } catch (err) {
                 console.error('Failed to fetch GPS base data:', err);
+                setGpsDataLoaded(true); // Still mark as loaded to avoid infinite loading state
             }
         };
         fetchGpsBaseData();
@@ -283,7 +304,8 @@ export default function DashboardView() {
 
     // Compute GPS compliance stats based on filtered sites (from siteStats)
     const gpsComplianceStats = React.useMemo(() => {
-        if (foTechData.size === 0 || siteStats.length === 0) return null;
+        // Don't compute stats until all GPS data is loaded
+        if (foTechData.size === 0 || siteStats.length === 0 || !gpsDataLoaded) return null;
 
         // Get normalized site IDs from the current dashboard view (filtered by date range)
         const dashboardSiteIds = new Set(siteStats.map(s => normalizeSiteId(s.site_id)));
@@ -346,7 +368,7 @@ export default function DashboardView() {
             pmrDoneButMissingGps: missingGpsSites.length, // All are PMR done since they're from siteStats
             missingGpsSitesList: missingGpsSites
         };
-    }, [foTechData, gpsEntrySites, siteStats]);
+    }, [foTechData, gpsEntrySites, siteStats, gpsDataLoaded]);
     
     // Get filtered NFO list based on selected city
     const filteredFmeNames = selectedCity 
@@ -1431,11 +1453,14 @@ export default function DashboardView() {
                                             data.tag_pics_available += site.tag_pics_available;
                                             data.tag_pics_required += site.tag_pics_required;
                                             // GPS tracking: check if site needs GPS (has 4G-TDD/5G)
-                                            const normalizedSiteId = normalizeSiteId(site.site_id);
-                                            if (foTechData.has(normalizedSiteId)) {
-                                                data.gps_total++;
-                                                if (gpsEntrySites.has(normalizedSiteId)) {
-                                                    data.gps_found++;
+                                            // Only count GPS if gpsDataLoaded is true to avoid showing wrong "missing" counts
+                                            if (gpsDataLoaded) {
+                                                const normalizedSiteId = normalizeSiteId(site.site_id);
+                                                if (foTechData.has(normalizedSiteId)) {
+                                                    data.gps_total++;
+                                                    if (gpsEntrySites.has(normalizedSiteId)) {
+                                                        data.gps_found++;
+                                                    }
                                                 }
                                             }
                                         });
@@ -1625,11 +1650,14 @@ export default function DashboardView() {
                                             data.tag_pics_available += site.tag_pics_available;
                                             data.tag_pics_required += site.tag_pics_required;
                                             // GPS tracking: check if site needs GPS (has 4G-TDD/5G)
-                                            const normalizedSiteId = normalizeSiteId(site.site_id);
-                                            if (foTechData.has(normalizedSiteId)) {
-                                                data.gps_total++;
-                                                if (gpsEntrySites.has(normalizedSiteId)) {
-                                                    data.gps_found++;
+                                            // Only count GPS if gpsDataLoaded is true to avoid showing wrong "missing" counts
+                                            if (gpsDataLoaded) {
+                                                const normalizedSiteId = normalizeSiteId(site.site_id);
+                                                if (foTechData.has(normalizedSiteId)) {
+                                                    data.gps_total++;
+                                                    if (gpsEntrySites.has(normalizedSiteId)) {
+                                                        data.gps_found++;
+                                                    }
                                                 }
                                             }
                                         });
@@ -1861,6 +1889,8 @@ export default function DashboardView() {
                                                 </td>
                                                 <td className="px-4 py-3 text-center">
                                                     {(() => {
+                                                        // Only show GPS status if gpsDataLoaded is true
+                                                        if (!gpsDataLoaded) return <span className="text-slate-400">...</span>;
                                                         const normalizedSiteId = normalizeSiteId(site.site_id);
                                                         const needsGps = foTechData.has(normalizedSiteId);
                                                         const hasGps = gpsEntrySites.has(normalizedSiteId);
