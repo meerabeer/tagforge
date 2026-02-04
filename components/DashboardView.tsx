@@ -14,11 +14,13 @@ interface PMRPlan {
     City: string;
     "FME Name": string;
     Status: string;
+    Site_Type: string | null;
 }
 
 interface InventoryRow {
     site_id: string;
     category: string;
+    equipment_type: string | null;
     tag_category: string | null;
     photo_category: string | null;
     serial_number: string | null;
@@ -36,6 +38,7 @@ interface SiteStats {
     actual_date: string;
     city: string;
     fme_name: string;
+    site_type: string | null;
     categories: {
         'Enclosure-Active': CategoryStats;
         'Enclosure-Passive': CategoryStats;
@@ -52,6 +55,11 @@ interface SiteStats {
     // Tag pictures metrics
     tag_pics_available: number;
     tag_pics_required: number;
+    // Passive validation metrics
+    gsm_antenna_required: boolean;
+    gsm_antenna_found: boolean;
+    mw_antenna_required: boolean;
+    mw_antenna_found: boolean;
 }
 
 type CategoryKey = keyof SiteStats['categories'];
@@ -166,6 +174,10 @@ export default function DashboardView() {
         totalDuplicateTags: number;
         totalTagPicsAvailable: number;
         totalTagPicsRequired: number;
+        gsmRequired: number;
+        gsmCompliant: number;
+        mwRequired: number;
+        mwCompliant: number;
     } | null>(null);
 
     // Fetch filter options on mount
@@ -426,7 +438,7 @@ export default function DashboardView() {
             // (Date format in DB is D-Mon-YY which doesn't work with SQL date comparison)
             let query = supabase
                 .from('pmr_actual_2026')
-                .select('Site_ID, Site_ID_1, Planned_PMR_Date, \"Autual_PMR_Date\", City, \"FME Name\", Status');
+                .select('Site_ID, Site_ID_1, Planned_PMR_Date, \"Autual_PMR_Date\", City, \"FME Name\", Status, Site_Type');
             
             if (selectedCity) {
                 query = query.eq('City', selectedCity);
@@ -489,7 +501,7 @@ export default function DashboardView() {
                 while (hasMore) {
                     const { data, error } = await supabase
                         .from('main_inventory')
-                        .select('site_id, category, tag_category, photo_category, serial_number, tag_id, tag_pic_url')
+                        .select('site_id, category, equipment_type, tag_category, photo_category, serial_number, tag_id, tag_pic_url')
                         .in('site_id', batch)
                         .range(offset, offset + PAGE_SIZE - 1);
                     
@@ -610,11 +622,46 @@ export default function DashboardView() {
                 const tagPicsAvailable = rowsRequiringTagPic.filter(r => r.tag_pic_url && r.tag_pic_url.trim() !== '').length;
                 const tagPicsRequired = rowsRequiringTagPic.length;
 
+                // === PASSIVE VALIDATION ===
+                const siteType = (plan.Site_Type || '').toUpperCase();
+                const isIBS = siteType === 'IBS';
+
+                // GSM Antenna Validation (Non-IBS only)
+                // Trigger: Has ERS or RRUS/RUS in RAN-Active
+                const hasERS = allRows.some(r => 
+                    r.category === 'RAN-Active' && 
+                    (r.equipment_type || '').toUpperCase() === 'ERS'
+                );
+                const hasRRUS = allRows.some(r => 
+                    r.category === 'RAN-Active' && 
+                    (r.equipment_type || '').toUpperCase() === 'RRUS/RUS'
+                );
+                const gsmAntennaRequired = !isIBS && (hasERS || hasRRUS);
+                const gsmAntennaFound = allRows.some(r => 
+                    r.category === 'RAN-Passive' && 
+                    (r.equipment_type || '').toUpperCase() === 'GSM ANTENNA'
+                );
+
+                // MW Antenna Validation (All sites)
+                // Trigger: Has Eband or Kband in MW-Active
+                const hasEbandOrKband = allRows.some(r => {
+                    if (r.category !== 'MW-Active') return false;
+                    const eqType = (r.equipment_type || '').toUpperCase();
+                    return eqType.includes('EBAND') || eqType.includes('KBAND');
+                });
+                const mwAntennaRequired = hasEbandOrKband;
+                const mwAntennaFound = allRows.some(r => {
+                    if (r.category !== 'MW-Passive') return false;
+                    const eqType = (r.equipment_type || '').toUpperCase();
+                    return eqType.startsWith('MW ANTENNA');
+                });
+
                 return {
                     site_id: displayId,
                     actual_date: plan['Autual_PMR_Date'] || plan.Planned_PMR_Date,
                     city: plan.City || '',
                     fme_name: plan['FME Name'] || '',
+                    site_type: plan.Site_Type || null,
                     categories,
                     totalRows,
                     totalFilled,
@@ -622,6 +669,10 @@ export default function DashboardView() {
                     duplicate_tags: duplicateTags,
                     tag_pics_available: tagPicsAvailable,
                     tag_pics_required: tagPicsRequired,
+                    gsm_antenna_required: gsmAntennaRequired,
+                    gsm_antenna_found: gsmAntennaFound,
+                    mw_antenna_required: mwAntennaRequired,
+                    mw_antenna_found: mwAntennaFound,
                 };
             });
 
@@ -645,6 +696,11 @@ export default function DashboardView() {
             let aggTagPicsRequired = 0;
             let submittedSites = 0;  // Sites with completion > 10%
             let pendingSites = 0;    // Sites with completion <= 10%
+            // Passive validation aggregates
+            let aggGsmRequired = 0;
+            let aggGsmCompliant = 0;
+            let aggMwRequired = 0;
+            let aggMwCompliant = 0;
 
             results.forEach(site => {
                 CATEGORIES.forEach(cat => {
@@ -657,6 +713,16 @@ export default function DashboardView() {
                 aggDuplicateTags += site.duplicate_tags;
                 aggTagPicsAvailable += site.tag_pics_available;
                 aggTagPicsRequired += site.tag_pics_required;
+                
+                // Passive validation aggregation
+                if (site.gsm_antenna_required) {
+                    aggGsmRequired++;
+                    if (site.gsm_antenna_found) aggGsmCompliant++;
+                }
+                if (site.mw_antenna_required) {
+                    aggMwRequired++;
+                    if (site.mw_antenna_found) aggMwCompliant++;
+                }
                 
                 // Calculate site completion percentage for submitted/pending classification
                 const siteCompletionPct = site.totalRows > 0 
@@ -680,6 +746,10 @@ export default function DashboardView() {
                 totalDuplicateTags: aggDuplicateTags,
                 totalTagPicsAvailable: aggTagPicsAvailable,
                 totalTagPicsRequired: aggTagPicsRequired,
+                gsmRequired: aggGsmRequired,
+                gsmCompliant: aggGsmCompliant,
+                mwRequired: aggMwRequired,
+                mwCompliant: aggMwCompliant,
             });
 
         } catch (err) {
@@ -901,6 +971,11 @@ export default function DashboardView() {
         let aggTagPicsRequired = 0;
         let submittedSites = 0;
         let pendingSites = 0;
+        // Passive validation aggregates
+        let aggGsmRequired = 0;
+        let aggGsmCompliant = 0;
+        let aggMwRequired = 0;
+        let aggMwCompliant = 0;
 
         filteredSiteStats.forEach(site => {
             CATEGORIES.forEach(cat => {
@@ -913,6 +988,16 @@ export default function DashboardView() {
             aggDuplicateTags += site.duplicate_tags;
             aggTagPicsAvailable += site.tag_pics_available;
             aggTagPicsRequired += site.tag_pics_required;
+            
+            // Passive validation aggregation
+            if (site.gsm_antenna_required) {
+                aggGsmRequired++;
+                if (site.gsm_antenna_found) aggGsmCompliant++;
+            }
+            if (site.mw_antenna_required) {
+                aggMwRequired++;
+                if (site.mw_antenna_found) aggMwCompliant++;
+            }
             
             const siteCompletionPct = site.totalRows > 0 
                 ? (site.totalFilled / site.totalRows) * 100 
@@ -935,6 +1020,10 @@ export default function DashboardView() {
             totalDuplicateTags: aggDuplicateTags,
             totalTagPicsAvailable: aggTagPicsAvailable,
             totalTagPicsRequired: aggTagPicsRequired,
+            gsmRequired: aggGsmRequired,
+            gsmCompliant: aggGsmCompliant,
+            mwRequired: aggMwRequired,
+            mwCompliant: aggMwCompliant,
         };
     }, [aggregatedStats, filteredSiteStats, filterByCategory, completionThreshold]);
 
@@ -1213,6 +1302,38 @@ export default function DashboardView() {
                                     )}
                                 </div>
                             )}
+                            {/* GSM Antenna (RAN-Passive) Card */}
+                            {displayStats.gsmRequired > 0 && (
+                                <div className={`rounded-lg p-4 ${displayStats.gsmCompliant === displayStats.gsmRequired ? 'bg-green-50' : 'bg-orange-50'}`}>
+                                    <div className={`text-2xl font-bold ${displayStats.gsmCompliant === displayStats.gsmRequired ? 'text-green-600' : 'text-orange-600'}`}>
+                                        {displayStats.gsmCompliant}/{displayStats.gsmRequired}
+                                    </div>
+                                    <div className="text-sm text-slate-600">
+                                        RAN Passive ({displayStats.gsmRequired > 0 ? Math.round((displayStats.gsmCompliant / displayStats.gsmRequired) * 100) : 0}%)
+                                    </div>
+                                    {displayStats.gsmRequired - displayStats.gsmCompliant > 0 && (
+                                        <div className="text-sm text-red-600 font-medium">
+                                            {displayStats.gsmRequired - displayStats.gsmCompliant} missing
+                                        </div>
+                                    )}
+                                </div>
+                            )}
+                            {/* MW Antenna (MW-Passive) Card */}
+                            {displayStats.mwRequired > 0 && (
+                                <div className={`rounded-lg p-4 ${displayStats.mwCompliant === displayStats.mwRequired ? 'bg-green-50' : 'bg-orange-50'}`}>
+                                    <div className={`text-2xl font-bold ${displayStats.mwCompliant === displayStats.mwRequired ? 'text-green-600' : 'text-orange-600'}`}>
+                                        {displayStats.mwCompliant}/{displayStats.mwRequired}
+                                    </div>
+                                    <div className="text-sm text-slate-600">
+                                        MW Passive ({displayStats.mwRequired > 0 ? Math.round((displayStats.mwCompliant / displayStats.mwRequired) * 100) : 0}%)
+                                    </div>
+                                    {displayStats.mwRequired - displayStats.mwCompliant > 0 && (
+                                        <div className="text-sm text-red-600 font-medium">
+                                            {displayStats.mwRequired - displayStats.mwCompliant} missing
+                                        </div>
+                                    )}
+                                </div>
+                            )}
                         </div>
 
                         {/* Category Breakdown */}
@@ -1394,6 +1515,8 @@ export default function DashboardView() {
                                         <th className="text-center px-3 py-3 font-medium text-slate-700">Duplicates</th>
                                         <th className="text-center px-3 py-3 font-medium text-slate-700">Tag Pics</th>
                                         <th className="text-center px-3 py-3 font-medium text-slate-700">GPS SYS</th>
+                                        <th className="text-center px-3 py-3 font-medium text-slate-700">RAN Pass</th>
+                                        <th className="text-center px-3 py-3 font-medium text-slate-700">MW Pass</th>
                                         <th className="text-center px-4 py-3 font-medium text-slate-700">Completion</th>
                                     </tr>
                                 </thead>
@@ -1412,6 +1535,10 @@ export default function DashboardView() {
                                             tag_pics_required: number;
                                             gps_total: number;
                                             gps_found: number;
+                                            gsm_required: number;
+                                            gsm_found: number;
+                                            mw_required: number;
+                                            mw_found: number;
                                         }>();
                                         
                                         // Use filteredSiteStats to aggregate only sites that pass the filter
@@ -1437,6 +1564,10 @@ export default function DashboardView() {
                                                     tag_pics_required: 0,
                                                     gps_total: 0,
                                                     gps_found: 0,
+                                                    gsm_required: 0,
+                                                    gsm_found: 0,
+                                                    mw_required: 0,
+                                                    mw_found: 0,
                                                 });
                                             }
                                             const data = cityMap.get(city)!;
@@ -1463,6 +1594,16 @@ export default function DashboardView() {
                                                     }
                                                 }
                                             }
+                                            // GSM Antenna tracking
+                                            if (site.gsm_antenna_required) {
+                                                data.gsm_required++;
+                                                if (site.gsm_antenna_found) data.gsm_found++;
+                                            }
+                                            // MW Antenna tracking
+                                            if (site.mw_antenna_required) {
+                                                data.mw_required++;
+                                                if (site.mw_antenna_found) data.mw_found++;
+                                            }
                                         });
                                         
                                         // Sort by completion percentage descending
@@ -1476,7 +1617,7 @@ export default function DashboardView() {
                                         if (sortedCities.length === 0) {
                                             return (
                                                 <tr>
-                                                    <td colSpan={12} className="px-4 py-8 text-center text-slate-500">
+                                                    <td colSpan={14} className="px-4 py-8 text-center text-slate-500">
                                                         No areas match the selected completion filter
                                                     </td>
                                                 </tr>
@@ -1544,6 +1685,34 @@ export default function DashboardView() {
                                                             </div>
                                                         ) : '-'}
                                                     </td>
+                                                    <td className="px-3 py-3 text-center">
+                                                        {data.gsm_required > 0 ? (
+                                                            <div className="flex flex-col items-center">
+                                                                <span className={`text-xs font-medium ${data.gsm_found === data.gsm_required ? 'text-green-600' : 'text-orange-600'}`}>
+                                                                    {data.gsm_found}/{data.gsm_required}
+                                                                </span>
+                                                                {data.gsm_required - data.gsm_found > 0 && (
+                                                                    <span className="text-xs text-red-600">
+                                                                        {data.gsm_required - data.gsm_found} missing
+                                                                    </span>
+                                                                )}
+                                                            </div>
+                                                        ) : '-'}
+                                                    </td>
+                                                    <td className="px-3 py-3 text-center">
+                                                        {data.mw_required > 0 ? (
+                                                            <div className="flex flex-col items-center">
+                                                                <span className={`text-xs font-medium ${data.mw_found === data.mw_required ? 'text-green-600' : 'text-orange-600'}`}>
+                                                                    {data.mw_found}/{data.mw_required}
+                                                                </span>
+                                                                {data.mw_required - data.mw_found > 0 && (
+                                                                    <span className="text-xs text-red-600">
+                                                                        {data.mw_required - data.mw_found} missing
+                                                                    </span>
+                                                                )}
+                                                            </div>
+                                                        ) : '-'}
+                                                    </td>
                                                     <td className="px-4 py-3 text-center">
                                                         <div className="flex items-center justify-center gap-2">
                                                             <div className="w-16 h-2 bg-slate-200 rounded-full overflow-hidden">
@@ -1591,6 +1760,8 @@ export default function DashboardView() {
                                         <th className="text-center px-3 py-3 font-medium text-slate-700">Duplicates</th>
                                         <th className="text-center px-3 py-3 font-medium text-slate-700">Tag Pics</th>
                                         <th className="text-center px-3 py-3 font-medium text-slate-700">GPS SYS</th>
+                                        <th className="text-center px-3 py-3 font-medium text-slate-700">RAN Pass</th>
+                                        <th className="text-center px-3 py-3 font-medium text-slate-700">MW Pass</th>
                                         <th className="text-center px-4 py-3 font-medium text-slate-700">Completion</th>
                                     </tr>
                                 </thead>
@@ -1609,6 +1780,10 @@ export default function DashboardView() {
                                             tag_pics_required: number;
                                             gps_total: number;
                                             gps_found: number;
+                                            gsm_required: number;
+                                            gsm_found: number;
+                                            mw_required: number;
+                                            mw_found: number;
                                         }>();
                                         
                                         // Use filteredSiteStats to aggregate only sites that pass the filter
@@ -1634,6 +1809,10 @@ export default function DashboardView() {
                                                     tag_pics_required: 0,
                                                     gps_total: 0,
                                                     gps_found: 0,
+                                                    gsm_required: 0,
+                                                    gsm_found: 0,
+                                                    mw_required: 0,
+                                                    mw_found: 0,
                                                 });
                                             }
                                             const data = nfoMap.get(nfo)!;
@@ -1660,6 +1839,16 @@ export default function DashboardView() {
                                                     }
                                                 }
                                             }
+                                            // GSM Antenna tracking
+                                            if (site.gsm_antenna_required) {
+                                                data.gsm_required++;
+                                                if (site.gsm_antenna_found) data.gsm_found++;
+                                            }
+                                            // MW Antenna tracking
+                                            if (site.mw_antenna_required) {
+                                                data.mw_required++;
+                                                if (site.mw_antenna_found) data.mw_found++;
+                                            }
                                         });
                                         
                                         // Sort by completion percentage descending
@@ -1673,7 +1862,7 @@ export default function DashboardView() {
                                         if (sortedNFOs.length === 0) {
                                             return (
                                                 <tr>
-                                                    <td colSpan={12} className="px-4 py-8 text-center text-slate-500">
+                                                    <td colSpan={14} className="px-4 py-8 text-center text-slate-500">
                                                         No NFOs match the selected completion filter
                                                     </td>
                                                 </tr>
@@ -1743,6 +1932,34 @@ export default function DashboardView() {
                                                             </div>
                                                         ) : '-'}
                                                     </td>
+                                                    <td className="px-3 py-3 text-center">
+                                                        {data.gsm_required > 0 ? (
+                                                            <div className="flex flex-col items-center">
+                                                                <span className={`text-xs font-medium ${data.gsm_found === data.gsm_required ? 'text-green-600' : 'text-orange-600'}`}>
+                                                                    {data.gsm_found}/{data.gsm_required}
+                                                                </span>
+                                                                {data.gsm_required - data.gsm_found > 0 && (
+                                                                    <span className="text-xs text-red-600">
+                                                                        {data.gsm_required - data.gsm_found} missing
+                                                                    </span>
+                                                                )}
+                                                            </div>
+                                                        ) : '-'}
+                                                    </td>
+                                                    <td className="px-3 py-3 text-center">
+                                                        {data.mw_required > 0 ? (
+                                                            <div className="flex flex-col items-center">
+                                                                <span className={`text-xs font-medium ${data.mw_found === data.mw_required ? 'text-green-600' : 'text-orange-600'}`}>
+                                                                    {data.mw_found}/{data.mw_required}
+                                                                </span>
+                                                                {data.mw_required - data.mw_found > 0 && (
+                                                                    <span className="text-xs text-red-600">
+                                                                        {data.mw_required - data.mw_found} missing
+                                                                    </span>
+                                                                )}
+                                                            </div>
+                                                        ) : '-'}
+                                                    </td>
                                                     <td className="px-4 py-3 text-center">
                                                         <div className="flex items-center justify-center gap-2">
                                                             <div className="w-16 h-2 bg-slate-200 rounded-full overflow-hidden">
@@ -1807,6 +2024,8 @@ export default function DashboardView() {
                                         <th className="text-center px-4 py-3 font-medium text-slate-700">Duplicates</th>
                                         <th className="text-center px-4 py-3 font-medium text-slate-700">Tag Pics</th>
                                         <th className="text-center px-4 py-3 font-medium text-slate-700">GPS SYS</th>
+                                        <th className="text-center px-4 py-3 font-medium text-slate-700">RAN Pass</th>
+                                        <th className="text-center px-4 py-3 font-medium text-slate-700">MW Pass</th>
                                     </tr>
                                 </thead>
                                 <tbody className="divide-y divide-slate-100">
@@ -1906,6 +2125,34 @@ export default function DashboardView() {
                                                             </div>
                                                         );
                                                     })()}
+                                                </td>
+                                                {/* RAN Passive - GSM Antenna */}
+                                                <td className="px-4 py-3 text-center">
+                                                    {site.gsm_antenna_required ? (
+                                                        <span className={`inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium ${
+                                                            site.gsm_antenna_found
+                                                                ? 'bg-green-100 text-green-800'
+                                                                : 'bg-red-100 text-red-800'
+                                                        }`}>
+                                                            {site.gsm_antenna_found ? '✓ GSM' : '✗ GSM'}
+                                                        </span>
+                                                    ) : (
+                                                        <span className="text-xs text-slate-400">N/A</span>
+                                                    )}
+                                                </td>
+                                                {/* MW Passive - MW Antenna */}
+                                                <td className="px-4 py-3 text-center">
+                                                    {site.mw_antenna_required ? (
+                                                        <span className={`inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium ${
+                                                            site.mw_antenna_found
+                                                                ? 'bg-green-100 text-green-800'
+                                                                : 'bg-red-100 text-red-800'
+                                                        }`}>
+                                                            {site.mw_antenna_found ? '✓ MW' : '✗ MW'}
+                                                        </span>
+                                                    ) : (
+                                                        <span className="text-xs text-slate-400">N/A</span>
+                                                    )}
                                                 </td>
                                             </tr>
                                         );

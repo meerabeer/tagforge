@@ -27,6 +27,8 @@ interface InventoryRow {
     tag_pic_url: string | null;
     tag_category: string | null;
     photo_category: string | null;
+    category: string | null;
+    equipment_type: string | null;
 }
 
 interface PMRRow {
@@ -47,6 +49,13 @@ interface PMRRow {
     // Tag pictures metrics
     tag_pics_available: number;
     tag_pics_required: number;
+    // Passive validation metrics
+    // GSM Antenna: Non-IBS sites with ERS/RRUS need GSM Antenna in RAN-Passive
+    gsm_antenna_required: boolean; // true if site needs GSM Antenna
+    gsm_antenna_found: boolean;    // true if GSM Antenna exists
+    // MW Antenna: Sites with Eband/Kband need MW Antenna in MW-Passive
+    mw_antenna_required: boolean;  // true if site needs MW Antenna
+    mw_antenna_found: boolean;     // true if MW Antenna exists
 }
 
 // --- Component ---
@@ -61,7 +70,16 @@ export default function PMRView() {
     const [selectedDate, setSelectedDateState] = useState<string>(initialDate);
     const [loading, setLoading] = useState(false);
     const [rows, setRows] = useState<PMRRow[]>([]);
-    const [stats, setStats] = useState({ total: 0, submitted: 0, percentage: 0 });
+    const [stats, setStats] = useState({ 
+        total: 0, 
+        submitted: 0, 
+        percentage: 0,
+        // Passive validation stats
+        gsmRequired: 0,
+        gsmCompliant: 0,
+        mwRequired: 0,
+        mwCompliant: 0
+    });
     const [showUploadModal, setShowUploadModal] = useState(false);
 
     // --- URL Update Helper ---
@@ -118,7 +136,7 @@ export default function PMRView() {
 
             if (plans.length === 0) {
                 setRows([]);
-                setStats({ total: 0, submitted: 0, percentage: 0 });
+                setStats({ total: 0, submitted: 0, percentage: 0, gsmRequired: 0, gsmCompliant: 0, mwRequired: 0, mwCompliant: 0 });
                 setLoading(false);
                 return;
             }
@@ -133,7 +151,7 @@ export default function PMRView() {
 
             const { data: subsData, error: subsError } = await supabase
                 .from('main_inventory')
-                .select('site_id, sheet_source, updated_at, serial_number, tag_id, tag_pic_url, tag_category, photo_category')
+                .select('site_id, sheet_source, updated_at, serial_number, tag_id, tag_pic_url, tag_category, photo_category, category, equipment_type')
                 .in('site_id', Array.from(allSiteIds));
 
             if (subsError) throw subsError;
@@ -212,6 +230,40 @@ export default function PMRView() {
                 const tagPicsAvailable = rowsRequiringTagPic.filter(r => r.tag_pic_url && r.tag_pic_url.trim() !== '').length;
                 const tagPicsRequired = rowsRequiringTagPic.length;
 
+                // === PASSIVE VALIDATION ===
+                const siteType = (p.Site_Type || '').toUpperCase();
+                const isIBS = siteType === 'IBS';
+
+                // GSM Antenna Validation (Non-IBS only)
+                // Trigger: Has ERS or RRUS/RUS in RAN-Active
+                const hasERS = siteRows.some(r => 
+                    r.category === 'RAN-Active' && 
+                    r.equipment_type?.toUpperCase() === 'ERS'
+                );
+                const hasRRUS = siteRows.some(r => 
+                    r.category === 'RAN-Active' && 
+                    r.equipment_type?.toUpperCase() === 'RRUS/RUS'
+                );
+                const gsmAntennaRequired = !isIBS && (hasERS || hasRRUS);
+                const gsmAntennaFound = siteRows.some(r => 
+                    r.category === 'RAN-Passive' && 
+                    r.equipment_type?.toUpperCase() === 'GSM ANTENNA'
+                );
+
+                // MW Antenna Validation (All sites)
+                // Trigger: Has Eband or Kband in MW-Active
+                const hasEbandOrKband = siteRows.some(r => {
+                    if (r.category !== 'MW-Active') return false;
+                    const eqType = (r.equipment_type || '').toUpperCase();
+                    return eqType.includes('EBAND') || eqType.includes('KBAND');
+                });
+                const mwAntennaRequired = hasEbandOrKband;
+                const mwAntennaFound = siteRows.some(r => {
+                    if (r.category !== 'MW-Passive') return false;
+                    const eqType = (r.equipment_type || '').toUpperCase();
+                    return eqType.startsWith('MW ANTENNA');
+                });
+
                 // Prefer W format for display
                 const displayId = p.Site_ID_1 || p.Site_ID || 'Unknown';
 
@@ -230,7 +282,11 @@ export default function PMRView() {
                     duplicate_serials: duplicateSerials,
                     duplicate_tags: duplicateTags,
                     tag_pics_available: tagPicsAvailable,
-                    tag_pics_required: tagPicsRequired
+                    tag_pics_required: tagPicsRequired,
+                    gsm_antenna_required: gsmAntennaRequired,
+                    gsm_antenna_found: gsmAntennaFound,
+                    mw_antenna_required: mwAntennaRequired,
+                    mw_antenna_found: mwAntennaFound
                 };
             });
 
@@ -239,10 +295,22 @@ export default function PMRView() {
             // Calc stats
             const total = results.length;
             const submittedCount = results.filter(r => r.status === 'Submitted').length;
+            
+            // Only count submitted sites for passive validation
+            const submittedRows = results.filter(r => r.status === 'Submitted');
+            const gsmRequired = submittedRows.filter(r => r.gsm_antenna_required).length;
+            const gsmCompliant = submittedRows.filter(r => r.gsm_antenna_required && r.gsm_antenna_found).length;
+            const mwRequired = submittedRows.filter(r => r.mw_antenna_required).length;
+            const mwCompliant = submittedRows.filter(r => r.mw_antenna_required && r.mw_antenna_found).length;
+
             setStats({
                 total,
                 submitted: submittedCount,
-                percentage: total > 0 ? Math.round((submittedCount / total) * 100) : 0
+                percentage: total > 0 ? Math.round((submittedCount / total) * 100) : 0,
+                gsmRequired,
+                gsmCompliant,
+                mwRequired,
+                mwCompliant
             });
 
         } catch (err) {
@@ -290,12 +358,12 @@ export default function PMRView() {
                         </div>
 
                         {/* Stats Cards */}
-                        <div className="flex gap-4 w-full md:w-auto">
-                            <div className="bg-blue-50 border border-blue-100 p-4 rounded-lg flex-1 min-w-[120px] text-center">
+                        <div className="flex gap-4 w-full md:w-auto flex-wrap">
+                            <div className="bg-blue-50 border border-blue-100 p-4 rounded-lg flex-1 min-w-[100px] text-center">
                                 <div className="text-2xl font-bold text-blue-700">{stats.total}</div>
                                 <div className="text-xs text-blue-600 font-medium uppercase mt-1">Sites</div>
                             </div>
-                            <div className={`border p-4 rounded-lg flex-1 min-w-[120px] text-center ${stats.percentage === 100 ? 'bg-green-50 border-green-100' : 'bg-slate-50 border-slate-200'
+                            <div className={`border p-4 rounded-lg flex-1 min-w-[100px] text-center ${stats.percentage === 100 ? 'bg-green-50 border-green-100' : 'bg-slate-50 border-slate-200'
                                 }`}>
                                 <div className={`text-2xl font-bold ${stats.percentage === 100 ? 'text-green-700' : 'text-slate-700'
                                     }`}>
@@ -303,9 +371,47 @@ export default function PMRView() {
                                 </div>
                                 <div className="text-xs text-slate-500 font-medium uppercase mt-1">Submitted</div>
                             </div>
-                            <div className="bg-slate-50 border border-slate-200 p-4 rounded-lg flex-1 min-w-[120px] text-center">
+                            <div className="bg-slate-50 border border-slate-200 p-4 rounded-lg flex-1 min-w-[100px] text-center">
                                 <div className="text-2xl font-bold text-slate-700">{stats.percentage}%</div>
                                 <div className="text-xs text-slate-500 font-medium uppercase mt-1">Completion</div>
+                            </div>
+                            {/* GSM Antenna Compliance */}
+                            <div className={`border p-4 rounded-lg flex-1 min-w-[100px] text-center ${
+                                stats.gsmRequired > 0 && stats.gsmCompliant === stats.gsmRequired 
+                                    ? 'bg-green-50 border-green-100' 
+                                    : stats.gsmRequired > 0 && stats.gsmCompliant < stats.gsmRequired
+                                    ? 'bg-red-50 border-red-100'
+                                    : 'bg-slate-50 border-slate-200'
+                            }`}>
+                                <div className={`text-2xl font-bold ${
+                                    stats.gsmRequired > 0 && stats.gsmCompliant === stats.gsmRequired 
+                                        ? 'text-green-700' 
+                                        : stats.gsmRequired > 0 && stats.gsmCompliant < stats.gsmRequired
+                                        ? 'text-red-700'
+                                        : 'text-slate-700'
+                                }`}>
+                                    {stats.gsmCompliant}/{stats.gsmRequired}
+                                </div>
+                                <div className="text-xs text-slate-500 font-medium uppercase mt-1">RAN Passive</div>
+                            </div>
+                            {/* MW Antenna Compliance */}
+                            <div className={`border p-4 rounded-lg flex-1 min-w-[100px] text-center ${
+                                stats.mwRequired > 0 && stats.mwCompliant === stats.mwRequired 
+                                    ? 'bg-green-50 border-green-100' 
+                                    : stats.mwRequired > 0 && stats.mwCompliant < stats.mwRequired
+                                    ? 'bg-red-50 border-red-100'
+                                    : 'bg-slate-50 border-slate-200'
+                            }`}>
+                                <div className={`text-2xl font-bold ${
+                                    stats.mwRequired > 0 && stats.mwCompliant === stats.mwRequired 
+                                        ? 'text-green-700' 
+                                        : stats.mwRequired > 0 && stats.mwCompliant < stats.mwRequired
+                                        ? 'text-red-700'
+                                        : 'text-slate-700'
+                                }`}>
+                                    {stats.mwCompliant}/{stats.mwRequired}
+                                </div>
+                                <div className="text-xs text-slate-500 font-medium uppercase mt-1">MW Passive</div>
                             </div>
                         </div>
                     </div>
@@ -325,16 +431,18 @@ export default function PMRView() {
                                 <th className="px-6 py-4 border-b text-center">Inventory</th>
                                 <th className="px-6 py-4 border-b text-center">Duplicates</th>
                                 <th className="px-6 py-4 border-b text-center">Tag Pictures</th>
+                                <th className="px-6 py-4 border-b text-center">RAN Passive</th>
+                                <th className="px-6 py-4 border-b text-center">MW Passive</th>
                             </tr>
                         </thead>
                         <tbody className="divide-y divide-slate-100 text-sm">
                             {loading ? (
                                 <tr>
-                                    <td colSpan={9} className="px-6 py-12 text-center text-slate-500">Loading plan data...</td>
+                                    <td colSpan={11} className="px-6 py-12 text-center text-slate-500">Loading plan data...</td>
                                 </tr>
                             ) : rows.length === 0 ? (
                                 <tr>
-                                    <td colSpan={9} className="px-6 py-12 text-center text-slate-500">No PMR records found for this date.</td>
+                                    <td colSpan={11} className="px-6 py-12 text-center text-slate-500">No PMR records found for this date.</td>
                                 </tr>
                             ) : (
                                 rows.map((row) => (
@@ -397,6 +505,38 @@ export default function PMRView() {
                                                         </span>
                                                     )}
                                                 </div>
+                                            ) : '-'}
+                                        </td>
+                                        {/* RAN Passive - GSM Antenna */}
+                                        <td className="px-6 py-3 text-center">
+                                            {row.status === 'Submitted' ? (
+                                                row.gsm_antenna_required ? (
+                                                    <span className={`inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium ${
+                                                        row.gsm_antenna_found
+                                                            ? 'bg-green-100 text-green-800'
+                                                            : 'bg-red-100 text-red-800'
+                                                    }`}>
+                                                        {row.gsm_antenna_found ? '✓ GSM' : '✗ GSM'}
+                                                    </span>
+                                                ) : (
+                                                    <span className="text-xs text-slate-400">N/A</span>
+                                                )
+                                            ) : '-'}
+                                        </td>
+                                        {/* MW Passive - MW Antenna */}
+                                        <td className="px-6 py-3 text-center">
+                                            {row.status === 'Submitted' ? (
+                                                row.mw_antenna_required ? (
+                                                    <span className={`inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium ${
+                                                        row.mw_antenna_found
+                                                            ? 'bg-green-100 text-green-800'
+                                                            : 'bg-red-100 text-red-800'
+                                                    }`}>
+                                                        {row.mw_antenna_found ? '✓ MW' : '✗ MW'}
+                                                    </span>
+                                                ) : (
+                                                    <span className="text-xs text-slate-400">N/A</span>
+                                                )
                                             ) : '-'}
                                         </td>
                                     </tr>
