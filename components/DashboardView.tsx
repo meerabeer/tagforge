@@ -99,21 +99,24 @@ export default function DashboardView() {
     // Date range selection
     const [startDate, setStartDateState] = useState<string>(initialStartDate);
     const [endDate, setEndDateState] = useState<string>(initialEndDate);
-    
+
     // Filters
     const [selectedCity, setSelectedCityState] = useState<string>(initialCity);
     const [selectedFME, setSelectedFMEState] = useState<string>(initialFME);
     const [cities, setCities] = useState<string[]>([]);
     const [fmeNames, setFmeNames] = useState<string[]>([]);
     const [cityFmeMap, setCityFmeMap] = useState<Map<string, string[]>>(new Map());
-    
+
     // Month/Quarter selection
     const [selectedMonth, setSelectedMonthState] = useState<string>(initialMonth);
     const [selectedQuarter, setSelectedQuarterState] = useState<string>(initialQuarter);
-    
+
     // Completion percentage filter (client-side only, not in URL)
     const [completionThreshold, setCompletionThreshold] = useState<'' | 'gte90' | '90' | '85' | '80' | '75' | '70' | '10'>('');
     const [filterByCategory, setFilterByCategory] = useState<'' | CategoryKey | 'overall'>('');
+
+    // Summary pill filter state
+    const [summaryFilter, setSummaryFilter] = useState<'duplicates' | 'tag_pics' | 'gps_sys' | 'ran_pass' | 'mw_pass' | ''>('');
 
     // --- URL Update Helpers ---
     const updateUrlParams = useCallback((updates: Record<string, string>) => {
@@ -156,7 +159,7 @@ export default function DashboardView() {
         if (urlMonth !== selectedMonth) setSelectedMonthState(urlMonth);
         if (urlQuarter !== selectedQuarter) setSelectedQuarterState(urlQuarter);
     }, [searchParams]);
-    
+
     // Data
     const [siteStats, setSiteStats] = useState<SiteStats[]>([]);
     const [loading, setLoading] = useState(false);
@@ -189,16 +192,16 @@ export default function DashboardView() {
                 .select('City, "FME Name"')
                 .not('City', 'is', null)
                 .not('FME Name', 'is', null);
-            
+
             if (cityFmeData) {
                 // Build city list
                 const uniqueCities = [...new Set(cityFmeData.map(r => r.City as string))].sort();
                 setCities(uniqueCities);
-                
+
                 // Build all FME names
                 const allFME = [...new Set(cityFmeData.map(r => r['FME Name'] as string))].sort();
                 setFmeNames(allFME);
-                
+
                 // Build city -> FME mapping
                 const mapping = new Map<string, Set<string>>();
                 cityFmeData.forEach(row => {
@@ -209,7 +212,7 @@ export default function DashboardView() {
                     }
                     mapping.get(city)!.add(fme);
                 });
-                
+
                 // Convert Sets to sorted Arrays
                 const finalMap = new Map<string, string[]>();
                 mapping.forEach((fmeSet, city) => {
@@ -242,23 +245,23 @@ export default function DashboardView() {
                 let allTddSites: { site_id: string; region: string; technology: string }[] = [];
                 let offset = 0;
                 const batchSize = 1000;
-                
+
                 while (true) {
                     const { data: batch, error } = await supabase
                         .from('fo_database_and_technology_updates')
                         .select('site_id, region, technology')
                         .in('technology', ['4G-TDD', '5G'])
                         .range(offset, offset + batchSize - 1);
-                    
+
                     if (error) {
                         console.error('[GPS] Fetch error:', error);
                         break;
                     }
                     if (!batch || batch.length === 0) break;
-                    
+
                     allTddSites = allTddSites.concat(batch);
                     console.log('[GPS] Fetched batch', offset, 'to', offset + batch.length, 'total:', allTddSites.length);
-                    
+
                     if (batch.length < batchSize) break; // Last batch
                     offset += batchSize;
                 }
@@ -281,7 +284,7 @@ export default function DashboardView() {
                 let allGpsEntries: { site_id: string }[] = [];
                 let gpsOffset = 0;
                 const gpsBatchSize = 1000;
-                
+
                 while (true) {
                     const { data: gpsBatch, error: gpsError } = await supabase
                         .from('main_inventory')
@@ -289,15 +292,15 @@ export default function DashboardView() {
                         .eq('category', 'RAN-Passive')
                         .eq('equipment_type', 'GPS System')
                         .range(gpsOffset, gpsOffset + gpsBatchSize - 1);
-                    
+
                     if (gpsError) {
                         console.error('[GPS] Fetch error:', gpsError);
                         break;
                     }
                     if (!gpsBatch || gpsBatch.length === 0) break;
-                    
+
                     allGpsEntries = allGpsEntries.concat(gpsBatch);
-                    
+
                     if (gpsBatch.length < gpsBatchSize) break; // Last batch
                     gpsOffset += gpsBatchSize;
                 }
@@ -321,13 +324,13 @@ export default function DashboardView() {
 
         // Get normalized site IDs from the current dashboard view (filtered by date range)
         const dashboardSiteIds = new Set(siteStats.map(s => normalizeSiteId(s.site_id)));
-        
+
         // Debug: log sample site IDs to check format
         console.log('[GPS Debug] Sample siteStats site_ids:', siteStats.slice(0, 5).map(s => s.site_id));
         console.log('[GPS Debug] Sample normalized dashboard IDs:', [...dashboardSiteIds].slice(0, 5));
         console.log('[GPS Debug] Sample foTechData keys:', [...foTechData.keys()].slice(0, 5));
         console.log('[GPS Debug] foTechData size:', foTechData.size, 'dashboardSiteIds size:', dashboardSiteIds.size);
-        
+
         // Check for intersection manually
         let matchCount = 0;
         const sampleMatches: string[] = [];
@@ -346,7 +349,7 @@ export default function DashboardView() {
                 sitesNeedingGps.push(siteId);
             }
         });
-        
+
         console.log('[GPS Debug] sitesNeedingGps count:', sitesNeedingGps.length);
 
         // Calculate stats
@@ -381,12 +384,12 @@ export default function DashboardView() {
             missingGpsSitesList: missingGpsSites
         };
     }, [foTechData, gpsEntrySites, siteStats, gpsDataLoaded]);
-    
+
     // Get filtered NFO list based on selected city
-    const filteredFmeNames = selectedCity 
+    const filteredFmeNames = selectedCity
         ? cityFmeMap.get(selectedCity) || []
         : fmeNames;
-    
+
     // When city changes, reset NFO if not valid for new city
     useEffect(() => {
         if (selectedCity && selectedFME) {
@@ -429,7 +432,7 @@ export default function DashboardView() {
 
     const fetchDashboardData = useCallback(async () => {
         if (!startDate || !endDate) return;
-        
+
         setLoading(true);
         setError(null);
 
@@ -439,14 +442,14 @@ export default function DashboardView() {
             let query = supabase
                 .from('pmr_actual_2026')
                 .select('Site_ID, Site_ID_1, Planned_PMR_Date, \"Autual_PMR_Date\", City, \"FME Name\", Status, Site_Type');
-            
+
             if (selectedCity) {
                 query = query.eq('City', selectedCity);
             }
             if (selectedFME) {
                 query = query.eq('FME Name', selectedFME);
             }
-            
+
             const { data: allPlansData, error: plansError } = await query;
 
             if (plansError) {
@@ -454,7 +457,7 @@ export default function DashboardView() {
             }
 
             // Filter by date range client-side
-            const plansData = (allPlansData || []).filter(p => 
+            const plansData = (allPlansData || []).filter(p =>
                 isDateInRange(p['Autual_PMR_Date'], startDate, endDate)
             );
 
@@ -481,32 +484,32 @@ export default function DashboardView() {
             // 3. Fetch inventory data for these sites - use parallel fetching for speed
             const siteIdArray = Array.from(allSiteIds);
             const BATCH_SIZE = 100; // Sites per batch - larger batches, fewer parallel requests
-            
+
             console.log('[Dashboard] Starting inventory fetch for', siteIdArray.length, 'sites');
             console.log('[Dashboard] Site IDs include W2949?', siteIdArray.includes('W2949'));
-            
+
             // Create batches
             const batches: string[][] = [];
             for (let i = 0; i < siteIdArray.length; i += BATCH_SIZE) {
                 batches.push(siteIdArray.slice(i, i + BATCH_SIZE));
             }
-            
+
             // Fetch all batches in parallel (each batch may need pagination)
             const fetchBatch = async (batch: string[]): Promise<InventoryRow[]> => {
                 const results: InventoryRow[] = [];
                 let hasMore = true;
                 let offset = 0;
                 const PAGE_SIZE = 1000;
-                
+
                 while (hasMore) {
                     const { data, error } = await supabase
                         .from('main_inventory')
                         .select('site_id, category, equipment_type, tag_category, photo_category, serial_number, tag_id, tag_pic_url')
                         .in('site_id', batch)
                         .range(offset, offset + PAGE_SIZE - 1);
-                    
+
                     if (error) throw new Error(`Fetch error: ${error.message}`);
-                    
+
                     if (data && data.length > 0) {
                         results.push(...(data as InventoryRow[]));
                         offset += PAGE_SIZE;
@@ -517,13 +520,13 @@ export default function DashboardView() {
                 }
                 return results;
             };
-            
+
             // Execute all batches in parallel
             const batchResults = await Promise.all(batches.map(fetchBatch));
             const inventory = batchResults.flat();
-            
+
             console.log('[Dashboard] Total inventory rows fetched:', inventory.length);
-            
+
             // Check if W2949 is in the results
             const w2949Rows = inventory.filter(r => r.site_id === 'W2949');
             console.log('[Dashboard] W2949 rows found:', w2949Rows.length, w2949Rows);
@@ -559,7 +562,7 @@ export default function DashboardView() {
                 // Use Site_ID_1 (W-format) to match inventory
                 const siteIdW = plan.Site_ID_1 || (plan.Site_ID ? `W${plan.Site_ID}` : '');
                 const displayId = siteIdW || plan.Site_ID || 'Unknown';
-                
+
                 // Get rows for this site using W-format
                 const allRows = inventoryBySite.get(siteIdW) || [];
 
@@ -618,7 +621,7 @@ export default function DashboardView() {
                     ];
                     return !excludedTagCategories.includes(tagCat) && !excludedPhotoCategories.includes(photoCat);
                 });
-                
+
                 const tagPicsAvailable = rowsRequiringTagPic.filter(r => r.tag_pic_url && r.tag_pic_url.trim() !== '').length;
                 const tagPicsRequired = rowsRequiringTagPic.length;
 
@@ -628,17 +631,17 @@ export default function DashboardView() {
 
                 // GSM Antenna Validation (Non-IBS only)
                 // Trigger: Has ERS or RRUS/RUS in RAN-Active
-                const hasERS = allRows.some(r => 
-                    r.category === 'RAN-Active' && 
+                const hasERS = allRows.some(r =>
+                    r.category === 'RAN-Active' &&
                     (r.equipment_type || '').toUpperCase() === 'ERS'
                 );
-                const hasRRUS = allRows.some(r => 
-                    r.category === 'RAN-Active' && 
+                const hasRRUS = allRows.some(r =>
+                    r.category === 'RAN-Active' &&
                     (r.equipment_type || '').toUpperCase() === 'RRUS/RUS'
                 );
                 const gsmAntennaRequired = !isIBS && (hasERS || hasRRUS);
-                const gsmAntennaFound = allRows.some(r => 
-                    r.category === 'RAN-Passive' && 
+                const gsmAntennaFound = allRows.some(r =>
+                    r.category === 'RAN-Passive' &&
                     (r.equipment_type || '').toUpperCase() === 'GSM ANTENNA'
                 );
 
@@ -713,7 +716,7 @@ export default function DashboardView() {
                 aggDuplicateTags += site.duplicate_tags;
                 aggTagPicsAvailable += site.tag_pics_available;
                 aggTagPicsRequired += site.tag_pics_required;
-                
+
                 // Passive validation aggregation
                 if (site.gsm_antenna_required) {
                     aggGsmRequired++;
@@ -723,10 +726,10 @@ export default function DashboardView() {
                     aggMwRequired++;
                     if (site.mw_antenna_found) aggMwCompliant++;
                 }
-                
+
                 // Calculate site completion percentage for submitted/pending classification
-                const siteCompletionPct = site.totalRows > 0 
-                    ? (site.totalFilled / site.totalRows) * 100 
+                const siteCompletionPct = site.totalRows > 0
+                    ? (site.totalFilled / site.totalRows) * 100
                     : 0;
                 if (siteCompletionPct > 10) {
                     submittedSites++;
@@ -779,7 +782,7 @@ export default function DashboardView() {
         { value: '11', label: 'November', start: '2026-11-01', end: '2026-11-30' },
         { value: '12', label: 'December', start: '2026-12-01', end: '2026-12-31' },
     ];
-    
+
     // Quarter options
     const QUARTERS = [
         { value: 'Q1', label: 'Q1 (Jan-Mar)', start: '2026-01-01', end: '2026-03-31' },
@@ -787,7 +790,7 @@ export default function DashboardView() {
         { value: 'Q3', label: 'Q3 (Jul-Sep)', start: '2026-07-01', end: '2026-09-30' },
         { value: 'Q4', label: 'Q4 (Oct-Dec)', start: '2026-10-01', end: '2026-12-31' },
     ];
-    
+
     // Handle month selection
     const handleMonthChange = (monthValue: string) => {
         const month = MONTHS.find(m => m.value === monthValue);
@@ -796,15 +799,15 @@ export default function DashboardView() {
             setSelectedQuarterState('');
             setStartDateState(month.start);
             setEndDateState(month.end);
-            updateUrlParams({ 
-                month: monthValue, 
-                quarter: '', 
-                startDate: month.start, 
-                endDate: month.end 
+            updateUrlParams({
+                month: monthValue,
+                quarter: '',
+                startDate: month.start,
+                endDate: month.end
             });
         }
     };
-    
+
     // Handle quarter selection
     const handleQuarterChange = (quarterValue: string) => {
         const quarter = QUARTERS.find(q => q.value === quarterValue);
@@ -813,11 +816,11 @@ export default function DashboardView() {
             setSelectedMonthState('');
             setStartDateState(quarter.start);
             setEndDateState(quarter.end);
-            updateUrlParams({ 
-                quarter: quarterValue, 
-                month: '', 
-                startDate: quarter.start, 
-                endDate: quarter.end 
+            updateUrlParams({
+                quarter: quarterValue,
+                month: '',
+                startDate: quarter.start,
+                endDate: quarter.end
             });
         }
     };
@@ -840,29 +843,54 @@ export default function DashboardView() {
         totalRows: number
     ): boolean => {
         if (!filterByCategory || !completionThreshold) return true;
-        
+
         let pct: number;
-        
+
         if (filterByCategory === 'overall') {
             pct = getPercentage(totalFilled, totalRows);
         } else {
             const stats = categories[filterByCategory as CategoryKey];
             pct = getPercentage(stats.filled, stats.total);
         }
-        
+
         // Handle gte90 (>=90%) separately
         if (completionThreshold === 'gte90') {
             return pct >= 90;
         }
-        
+
         const threshold = parseInt(completionThreshold);
         return pct <= threshold;
     };
 
-    // Filter siteStats based on completion filter
-    const filteredSiteStats = siteStats.filter(site => 
-        passesCompletionFilter(site.categories, site.totalFilled, site.totalRows)
-    );
+    // Filter siteStats based on completion filter AND summary filter
+    const filteredSiteStats = siteStats.filter(site => {
+        // First apply completion filter
+        if (!passesCompletionFilter(site.categories, site.totalFilled, site.totalRows)) {
+            return false;
+        }
+
+        // Then apply summary filter if active
+        if (summaryFilter === 'duplicates') {
+            return site.duplicate_serials > 0 || site.duplicate_tags > 0;
+        }
+        if (summaryFilter === 'tag_pics') {
+            return site.tag_pics_required > 0 && site.tag_pics_available < site.tag_pics_required;
+        }
+        if (summaryFilter === 'gps_sys') {
+            const normalizedSiteId = normalizeSiteId(site.site_id);
+            const needsGps = foTechData.has(normalizedSiteId);
+            const hasGps = gpsEntrySites.has(normalizedSiteId);
+            return needsGps && !hasGps;
+        }
+        if (summaryFilter === 'ran_pass') {
+            return site.gsm_antenna_required && !site.gsm_antenna_found;
+        }
+        if (summaryFilter === 'mw_pass') {
+            return site.mw_antenna_required && !site.mw_antenna_found;
+        }
+
+        return true;
+    });
 
     // CSV Download function for Site Details
     const downloadSiteDetailsCSV = () => {
@@ -884,12 +912,38 @@ export default function DashboardView() {
             'Duplicate Tags',
             'Tag Pics Available',
             'Tag Pics Required',
-            'Tag Pics Missing'
+            'Tag Pics Missing',
+            'GPS SYS Needed',
+            'GPS SYS Found',
+            'GPS SYS Status',
+            'RAN PASS Required',
+            'RAN PASS Found',
+            'RAN PASS Status',
+            'MW PASS Required',
+            'MW PASS Found',
+            'MW PASS Status'
         ];
 
         // Build CSV rows
         const rows = filteredSiteStats.map(site => {
             const overallPct = getPercentage(site.totalFilled, site.totalRows);
+
+            // GPS SYS calculation
+            const normalizedSiteId = normalizeSiteId(site.site_id);
+            const gpsNeeded = foTechData.has(normalizedSiteId) ? 1 : 0;
+            const gpsFound = (gpsNeeded && gpsEntrySites.has(normalizedSiteId)) ? 1 : 0;
+            const gpsStatus = gpsNeeded ? (gpsFound ? 'Found' : 'Missing') : 'N/A';
+
+            // RAN PASS calculation
+            const ranRequired = site.gsm_antenna_required ? 1 : 0;
+            const ranFound = site.gsm_antenna_found ? 1 : 0;
+            const ranStatus = site.gsm_antenna_required ? (site.gsm_antenna_found ? 'Pass' : 'Fail') : 'N/A';
+
+            // MW PASS calculation
+            const mwRequired = site.mw_antenna_required ? 1 : 0;
+            const mwFound = site.mw_antenna_found ? 1 : 0;
+            const mwStatus = site.mw_antenna_required ? (site.mw_antenna_found ? 'Pass' : 'Fail') : 'N/A';
+
             return [
                 site.site_id,
                 site.actual_date,
@@ -905,7 +959,16 @@ export default function DashboardView() {
                 site.duplicate_tags,
                 site.tag_pics_available,
                 site.tag_pics_required,
-                site.tag_pics_required - site.tag_pics_available
+                site.tag_pics_required - site.tag_pics_available,
+                gpsNeeded,
+                gpsFound,
+                gpsStatus,
+                ranRequired,
+                ranFound,
+                ranStatus,
+                mwRequired,
+                mwFound,
+                mwStatus
             ];
         });
 
@@ -926,7 +989,7 @@ export default function DashboardView() {
         const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
         const link = document.createElement('a');
         const url = URL.createObjectURL(blob);
-        
+
         // Generate filename with date range and filter info
         let filename = `site_details_${startDate}_to_${endDate}`;
         if (selectedCity) filename += `_${selectedCity}`;
@@ -935,7 +998,7 @@ export default function DashboardView() {
             filename += `_${filterByCategory}_${completionThreshold === 'gte90' ? 'gte90' : `lte${completionThreshold}`}pct`;
         }
         filename += '.csv';
-        
+
         link.setAttribute('href', url);
         link.setAttribute('download', filename);
         link.style.visibility = 'hidden';
@@ -947,7 +1010,7 @@ export default function DashboardView() {
     // Compute filtered aggregated stats when filter is active
     const displayStats = React.useMemo(() => {
         if (!aggregatedStats) return null;
-        
+
         // If no filter active, return original stats
         if (!filterByCategory || !completionThreshold) {
             return aggregatedStats;
@@ -988,7 +1051,7 @@ export default function DashboardView() {
             aggDuplicateTags += site.duplicate_tags;
             aggTagPicsAvailable += site.tag_pics_available;
             aggTagPicsRequired += site.tag_pics_required;
-            
+
             // Passive validation aggregation
             if (site.gsm_antenna_required) {
                 aggGsmRequired++;
@@ -998,9 +1061,9 @@ export default function DashboardView() {
                 aggMwRequired++;
                 if (site.mw_antenna_found) aggMwCompliant++;
             }
-            
-            const siteCompletionPct = site.totalRows > 0 
-                ? (site.totalFilled / site.totalRows) * 100 
+
+            const siteCompletionPct = site.totalRows > 0
+                ? (site.totalFilled / site.totalRows) * 100
                 : 0;
             if (siteCompletionPct > 10) {
                 submittedSites++;
@@ -1034,7 +1097,7 @@ export default function DashboardView() {
                 {/* Header / Date Selection */}
                 <div className="bg-white border border-slate-200 rounded-lg p-6 mb-4 shadow-sm">
                     <h2 className="text-xl font-semibold text-slate-900 mb-4">PMR Completion Dashboard</h2>
-                    
+
                     <div className="flex flex-wrap gap-4 items-end">
                         {/* Start Date */}
                         <div>
@@ -1160,7 +1223,7 @@ export default function DashboardView() {
                         {/* Clear Completion Filter */}
                         {(completionThreshold || filterByCategory) && (
                             <button
-                                onClick={() => { 
+                                onClick={() => {
                                     setCompletionThreshold('');
                                     setFilterByCategory('');
                                 }}
@@ -1173,9 +1236,9 @@ export default function DashboardView() {
                         {/* Clear Filters */}
                         {(selectedCity || selectedFME) && (
                             <button
-                                onClick={() => { 
-                                    setSelectedCityState(''); 
-                                    setSelectedFMEState(''); 
+                                onClick={() => {
+                                    setSelectedCityState('');
+                                    setSelectedFMEState('');
                                     updateUrlParams({ city: '', fme: '' });
                                 }}
                                 className="px-3 py-2 text-sm font-medium text-red-600 bg-red-50 hover:bg-red-100 rounded-md transition-colors"
@@ -1224,13 +1287,25 @@ export default function DashboardView() {
                     <div className="bg-white border border-slate-200 rounded-lg p-6 mb-4 shadow-sm">
                         <div className="flex items-center justify-between mb-4">
                             <h3 className="text-lg font-semibold text-slate-900">Overall Summary</h3>
-                            {filterByCategory && completionThreshold && (
-                                <span className="inline-flex items-center gap-1.5 px-3 py-1 bg-purple-100 text-purple-700 text-xs font-medium rounded-full">
-                                    Filtered: {filterByCategory === 'overall' ? 'Overall' : CATEGORY_DISPLAY_NAMES[filterByCategory as CategoryKey]} {completionThreshold === 'gte90' ? '≥ 90' : `≤ ${completionThreshold}`}%
-                                </span>
-                            )}
+                            <div className="flex items-center gap-2">
+                                {summaryFilter && (
+                                    <span className="inline-flex items-center gap-1.5 px-3 py-1 bg-blue-100 text-blue-700 text-xs font-medium rounded-full">
+                                        Showing: {summaryFilter === 'duplicates' ? 'Sites with Duplicates' :
+                                            summaryFilter === 'tag_pics' ? 'Sites Missing Tag Pics' :
+                                                summaryFilter === 'gps_sys' ? 'Sites Missing GPS SYS' :
+                                                    summaryFilter === 'ran_pass' ? 'Sites Missing RAN Passive' :
+                                                        'Sites Missing MW Passive'}
+                                        <button onClick={() => setSummaryFilter('')} className="hover:text-blue-900 font-bold">×</button>
+                                    </span>
+                                )}
+                                {filterByCategory && completionThreshold && (
+                                    <span className="inline-flex items-center gap-1.5 px-3 py-1 bg-purple-100 text-purple-700 text-xs font-medium rounded-full">
+                                        Filtered: {filterByCategory === 'overall' ? 'Overall' : CATEGORY_DISPLAY_NAMES[filterByCategory as CategoryKey]} {completionThreshold === 'gte90' ? '≥ 90' : `≤ ${completionThreshold}`}%
+                                    </span>
+                                )}
+                            </div>
                         </div>
-                        
+
                         {/* Top Level Stats */}
                         <div className="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-8 gap-4 mb-6">
                             <div className="bg-slate-50 rounded-lg p-4">
@@ -1262,7 +1337,11 @@ export default function DashboardView() {
                                 </div>
                                 <div className="text-sm text-slate-600">Overall Completion</div>
                             </div>
-                            <div className={`rounded-lg p-4 ${displayStats.totalDuplicateSerials + displayStats.totalDuplicateTags > 0 ? 'bg-red-50' : 'bg-green-50'}`}>
+                            <div
+                                onClick={() => setSummaryFilter(summaryFilter === 'duplicates' ? '' : 'duplicates')}
+                                className={`rounded-lg p-4 cursor-pointer transition-all hover:shadow-md ${summaryFilter === 'duplicates' ? 'ring-2 ring-blue-500 ' : ''
+                                    }${displayStats.totalDuplicateSerials + displayStats.totalDuplicateTags > 0 ? 'bg-red-50' : 'bg-green-50'}`}
+                            >
                                 <div className="flex flex-col gap-1">
                                     <div className={`text-lg font-bold ${displayStats.totalDuplicateSerials > 0 ? 'text-red-600' : 'text-green-600'}`}>
                                         S: {displayStats.totalDuplicateSerials > 0 ? displayStats.totalDuplicateSerials : '✓'}
@@ -1273,7 +1352,11 @@ export default function DashboardView() {
                                 </div>
                                 <div className="text-sm text-slate-600">Duplicates</div>
                             </div>
-                            <div className={`rounded-lg p-4 ${displayStats.totalTagPicsAvailable === displayStats.totalTagPicsRequired ? 'bg-green-50' : 'bg-orange-50'}`}>
+                            <div
+                                onClick={() => setSummaryFilter(summaryFilter === 'tag_pics' ? '' : 'tag_pics')}
+                                className={`rounded-lg p-4 cursor-pointer transition-all hover:shadow-md ${summaryFilter === 'tag_pics' ? 'ring-2 ring-blue-500 ' : ''
+                                    }${displayStats.totalTagPicsAvailable === displayStats.totalTagPicsRequired ? 'bg-green-50' : 'bg-orange-50'}`}
+                            >
                                 <div className={`text-2xl font-bold ${displayStats.totalTagPicsAvailable === displayStats.totalTagPicsRequired ? 'text-green-600' : 'text-orange-600'}`}>
                                     {displayStats.totalTagPicsAvailable}/{displayStats.totalTagPicsRequired}
                                 </div>
@@ -1288,7 +1371,11 @@ export default function DashboardView() {
                             </div>
                             {/* GPS System Card */}
                             {gpsComplianceStats && (
-                                <div className={`rounded-lg p-4 ${gpsComplianceStats.sitesMissingGps === 0 ? 'bg-green-50' : 'bg-orange-50'}`}>
+                                <div
+                                    onClick={() => setSummaryFilter(summaryFilter === 'gps_sys' ? '' : 'gps_sys')}
+                                    className={`rounded-lg p-4 cursor-pointer transition-all hover:shadow-md ${summaryFilter === 'gps_sys' ? 'ring-2 ring-blue-500 ' : ''
+                                        }${gpsComplianceStats.sitesMissingGps === 0 ? 'bg-green-50' : 'bg-orange-50'}`}
+                                >
                                     <div className={`text-2xl font-bold ${gpsComplianceStats.sitesMissingGps === 0 ? 'text-green-600' : 'text-orange-600'}`}>
                                         {gpsComplianceStats.sitesWithGps}/{gpsComplianceStats.totalSites4GTdd5G}
                                     </div>
@@ -1304,7 +1391,11 @@ export default function DashboardView() {
                             )}
                             {/* GSM Antenna (RAN-Passive) Card */}
                             {displayStats.gsmRequired > 0 && (
-                                <div className={`rounded-lg p-4 ${displayStats.gsmCompliant === displayStats.gsmRequired ? 'bg-green-50' : 'bg-orange-50'}`}>
+                                <div
+                                    onClick={() => setSummaryFilter(summaryFilter === 'ran_pass' ? '' : 'ran_pass')}
+                                    className={`rounded-lg p-4 cursor-pointer transition-all hover:shadow-md ${summaryFilter === 'ran_pass' ? 'ring-2 ring-blue-500 ' : ''
+                                        }${displayStats.gsmCompliant === displayStats.gsmRequired ? 'bg-green-50' : 'bg-orange-50'}`}
+                                >
                                     <div className={`text-2xl font-bold ${displayStats.gsmCompliant === displayStats.gsmRequired ? 'text-green-600' : 'text-orange-600'}`}>
                                         {displayStats.gsmCompliant}/{displayStats.gsmRequired}
                                     </div>
@@ -1320,7 +1411,11 @@ export default function DashboardView() {
                             )}
                             {/* MW Antenna (MW-Passive) Card */}
                             {displayStats.mwRequired > 0 && (
-                                <div className={`rounded-lg p-4 ${displayStats.mwCompliant === displayStats.mwRequired ? 'bg-green-50' : 'bg-orange-50'}`}>
+                                <div
+                                    onClick={() => setSummaryFilter(summaryFilter === 'mw_pass' ? '' : 'mw_pass')}
+                                    className={`rounded-lg p-4 cursor-pointer transition-all hover:shadow-md ${summaryFilter === 'mw_pass' ? 'ring-2 ring-blue-500 ' : ''
+                                        }${displayStats.mwCompliant === displayStats.mwRequired ? 'bg-green-50' : 'bg-orange-50'}`}
+                                >
                                     <div className={`text-2xl font-bold ${displayStats.mwCompliant === displayStats.mwRequired ? 'text-green-600' : 'text-orange-600'}`}>
                                         {displayStats.mwCompliant}/{displayStats.mwRequired}
                                     </div>
@@ -1365,128 +1460,7 @@ export default function DashboardView() {
                     </div>
                 )}
 
-                {/* GPS Compliance Widget - RAN-Passive GPS System */}
-                {gpsComplianceStats && gpsComplianceStats.totalSites4GTdd5G > 0 && (
-                    <div className="bg-white border border-slate-200 rounded-lg p-6 mb-4 shadow-sm">
-                        <div className="flex items-center justify-between mb-4">
-                            <div>
-                                <h3 className="text-lg font-semibold text-slate-900">RAN-Passive GPS System Compliance</h3>
-                                <p className="text-sm text-slate-500 mt-1">
-                                    Sites with 4G-TDD / 5G in selected date range ({startDate} to {endDate})
-                                </p>
-                            </div>
-                        </div>
-                        
-                        {/* GPS Stats Cards */}
-                        <div className="grid grid-cols-3 gap-4 mb-4">
-                            <div className="bg-blue-50 rounded-lg p-4">
-                                <div className="text-2xl font-bold text-blue-700">{gpsComplianceStats.totalSites4GTdd5G}</div>
-                                <div className="text-sm text-blue-600">Sites with 4G-TDD / 5G</div>
-                            </div>
-                            <div className="bg-green-50 rounded-lg p-4">
-                                <div className="text-2xl font-bold text-green-700">{gpsComplianceStats.sitesWithGps}</div>
-                                <div className="text-sm text-green-600">GPS Entries Found</div>
-                                <div className="text-xs text-green-500 mt-1">
-                                    {gpsComplianceStats.totalSites4GTdd5G > 0 
-                                        ? Math.round((gpsComplianceStats.sitesWithGps / gpsComplianceStats.totalSites4GTdd5G) * 100) 
-                                        : 0}% compliant
-                                </div>
-                            </div>
-                            <div className={`rounded-lg p-4 ${gpsComplianceStats.sitesMissingGps > 0 ? 'bg-red-50' : 'bg-green-50'}`}>
-                                <div className={`text-2xl font-bold ${gpsComplianceStats.sitesMissingGps > 0 ? 'text-red-700' : 'text-green-700'}`}>
-                                    {gpsComplianceStats.sitesMissingGps}
-                                </div>
-                                <div className={`text-sm ${gpsComplianceStats.sitesMissingGps > 0 ? 'text-red-600' : 'text-green-600'}`}>
-                                    Missing GPS Entry
-                                </div>
-                                <div className={`text-xs mt-1 ${gpsComplianceStats.sitesMissingGps > 0 ? 'text-red-500' : 'text-green-500'}`}>
-                                    {gpsComplianceStats.totalSites4GTdd5G > 0 
-                                        ? Math.round((gpsComplianceStats.sitesMissingGps / gpsComplianceStats.totalSites4GTdd5G) * 100) 
-                                        : 0}% missing
-                                </div>
-                            </div>
-                        </div>
 
-                        {/* Progress Bar */}
-                        <div className="mb-4">
-                            <div className="flex justify-between text-sm mb-1">
-                                <span className="text-slate-600">GPS Compliance Progress</span>
-                                <span className="font-medium text-slate-700">
-                                    {gpsComplianceStats.sitesWithGps} / {gpsComplianceStats.totalSites4GTdd5G}
-                                </span>
-                            </div>
-                            <div className="w-full h-3 bg-slate-200 rounded-full overflow-hidden">
-                                <div
-                                    className="h-full bg-green-500 transition-all"
-                                    style={{ 
-                                        width: `${gpsComplianceStats.totalSites4GTdd5G > 0 
-                                            ? (gpsComplianceStats.sitesWithGps / gpsComplianceStats.totalSites4GTdd5G) * 100 
-                                            : 0}%` 
-                                    }}
-                                />
-                            </div>
-                        </div>
-
-                        {/* Missing Sites List (collapsible) */}
-                        {gpsComplianceStats.sitesMissingGps > 0 && (
-                            <details className="group">
-                                <summary className="cursor-pointer text-sm font-medium text-slate-700 hover:text-slate-900 flex items-center gap-2">
-                                    <span className="group-open:rotate-90 transition-transform">▶</span>
-                                    View Sites Missing GPS Entry ({gpsComplianceStats.sitesMissingGps} sites)
-                                </summary>
-                                <div className="mt-3 max-h-64 overflow-y-auto border border-slate-200 rounded-lg">
-                                    <table className="w-full text-sm">
-                                        <thead className="bg-slate-50 sticky top-0">
-                                            <tr>
-                                                <th className="text-left px-4 py-2 text-slate-600">#</th>
-                                                <th className="text-left px-4 py-2 text-slate-600">Site ID</th>
-                                                <th className="text-left px-4 py-2 text-slate-600">Technology</th>
-                                                <th className="text-left px-4 py-2 text-slate-600">Region</th>
-                                                <th className="text-center px-4 py-2 text-slate-600">PMR Status</th>
-                                            </tr>
-                                        </thead>
-                                        <tbody className="divide-y divide-slate-100">
-                                            {gpsComplianceStats.missingGpsSitesList.slice(0, 100).map((site, idx) => (
-                                                <tr key={site.site_id} className={site.has_pmr_done ? 'bg-orange-50' : ''}>
-                                                    <td className="px-4 py-2 text-slate-500">{idx + 1}</td>
-                                                    <td className="px-4 py-2 font-medium text-slate-900">{site.site_id}</td>
-                                                    <td className="px-4 py-2">
-                                                        <span className={`inline-flex items-center px-2 py-0.5 rounded text-xs font-medium ${
-                                                            site.technology === '4G-TDD-5G' 
-                                                                ? 'bg-purple-100 text-purple-700' 
-                                                                : site.technology === '5G'
-                                                                    ? 'bg-blue-100 text-blue-700'
-                                                                    : 'bg-green-100 text-green-700'
-                                                        }`}>
-                                                            {site.technology}
-                                                        </span>
-                                                    </td>
-                                                    <td className="px-4 py-2 text-slate-600">{site.region || '-'}</td>
-                                                    <td className="px-4 py-2 text-center">
-                                                        {site.has_pmr_done ? (
-                                                            <span className="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-orange-100 text-orange-700">
-                                                                Done ⚠️
-                                                            </span>
-                                                        ) : (
-                                                            <span className="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-slate-100 text-slate-600">
-                                                                Pending
-                                                            </span>
-                                                        )}
-                                                    </td>
-                                                </tr>
-                                            ))}
-                                        </tbody>
-                                    </table>
-                                    {gpsComplianceStats.missingGpsSitesList.length > 100 && (
-                                        <div className="px-4 py-2 bg-slate-50 text-sm text-slate-500 text-center">
-                                            Showing first 100 of {gpsComplianceStats.missingGpsSitesList.length} sites
-                                        </div>
-                                    )}
-                                </div>
-                            </details>
-                        )}
-                    </div>
-                )}
 
                 {/* Area Performance Summary */}
                 {siteStats.length > 0 && (
@@ -1540,7 +1514,7 @@ export default function DashboardView() {
                                             mw_required: number;
                                             mw_found: number;
                                         }>();
-                                        
+
                                         // Use filteredSiteStats to aggregate only sites that pass the filter
                                         filteredSiteStats.forEach(site => {
                                             const city = site.city || 'Unknown';
@@ -1605,7 +1579,7 @@ export default function DashboardView() {
                                                 if (site.mw_antenna_found) data.mw_found++;
                                             }
                                         });
-                                        
+
                                         // Sort by completion percentage descending
                                         const sortedCities = Array.from(cityMap.entries())
                                             .sort((a, b) => {
@@ -1613,7 +1587,7 @@ export default function DashboardView() {
                                                 const pctB = b[1].totalRows > 0 ? b[1].totalFilled / b[1].totalRows : 0;
                                                 return pctB - pctA;
                                             });
-                                        
+
                                         if (sortedCities.length === 0) {
                                             return (
                                                 <tr>
@@ -1623,7 +1597,7 @@ export default function DashboardView() {
                                                 </tr>
                                             );
                                         }
-                                        
+
                                         return sortedCities.map(([city, data]) => {
                                             const overallPct = getPercentage(data.totalFilled, data.totalRows);
                                             return (
@@ -1785,7 +1759,7 @@ export default function DashboardView() {
                                             mw_required: number;
                                             mw_found: number;
                                         }>();
-                                        
+
                                         // Use filteredSiteStats to aggregate only sites that pass the filter
                                         filteredSiteStats.forEach(site => {
                                             const nfo = site.fme_name || 'Unknown';
@@ -1850,7 +1824,7 @@ export default function DashboardView() {
                                                 if (site.mw_antenna_found) data.mw_found++;
                                             }
                                         });
-                                        
+
                                         // Sort by completion percentage descending
                                         const sortedNFOs = Array.from(nfoMap.entries())
                                             .sort((a, b) => {
@@ -1858,7 +1832,7 @@ export default function DashboardView() {
                                                 const pctB = b[1].totalRows > 0 ? b[1].totalFilled / b[1].totalRows : 0;
                                                 return pctB - pctA;
                                             });
-                                        
+
                                         if (sortedNFOs.length === 0) {
                                             return (
                                                 <tr>
@@ -1868,7 +1842,7 @@ export default function DashboardView() {
                                                 </tr>
                                             );
                                         }
-                                        
+
                                         return sortedNFOs.map(([nfo, data]) => {
                                             const overallPct = getPercentage(data.totalFilled, data.totalRows);
                                             return (
@@ -2005,7 +1979,7 @@ export default function DashboardView() {
                                 </button>
                             </div>
                         </div>
-                        
+
                         <div className="overflow-x-auto">
                             <table className="w-full text-sm">
                                 <thead className="bg-slate-50 border-b border-slate-200">
@@ -2068,12 +2042,11 @@ export default function DashboardView() {
                                                     {site.totalFilled}/{site.totalRows}
                                                 </td>
                                                 <td className="px-4 py-3 text-center">
-                                                    <span className={`inline-block px-2 py-1 rounded-full text-xs font-medium ${
-                                                        overallPct >= 80 ? 'bg-green-100 text-green-700' :
+                                                    <span className={`inline-block px-2 py-1 rounded-full text-xs font-medium ${overallPct >= 80 ? 'bg-green-100 text-green-700' :
                                                         overallPct >= 50 ? 'bg-yellow-100 text-yellow-700' :
-                                                        overallPct >= 25 ? 'bg-orange-100 text-orange-700' :
-                                                        'bg-red-100 text-red-700'
-                                                    }`}>
+                                                            overallPct >= 25 ? 'bg-orange-100 text-orange-700' :
+                                                                'bg-red-100 text-red-700'
+                                                        }`}>
                                                         {overallPct}%
                                                     </span>
                                                 </td>
@@ -2090,10 +2063,9 @@ export default function DashboardView() {
                                                 <td className="px-4 py-3 text-center">
                                                     {site.tag_pics_required > 0 ? (
                                                         <div className="flex flex-col items-center">
-                                                            <span className={`font-medium ${
-                                                                site.tag_pics_available === site.tag_pics_required ? 'text-green-600' : 
+                                                            <span className={`font-medium ${site.tag_pics_available === site.tag_pics_required ? 'text-green-600' :
                                                                 site.tag_pics_available < site.tag_pics_required ? 'text-orange-600' : 'text-slate-900'
-                                                            }`}>
+                                                                }`}>
                                                                 {site.tag_pics_available}/{site.tag_pics_required}
                                                             </span>
                                                             {site.tag_pics_required - site.tag_pics_available > 0 && (
@@ -2129,11 +2101,10 @@ export default function DashboardView() {
                                                 {/* RAN Passive - GSM Antenna */}
                                                 <td className="px-4 py-3 text-center">
                                                     {site.gsm_antenna_required ? (
-                                                        <span className={`inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium ${
-                                                            site.gsm_antenna_found
-                                                                ? 'bg-green-100 text-green-800'
-                                                                : 'bg-red-100 text-red-800'
-                                                        }`}>
+                                                        <span className={`inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium ${site.gsm_antenna_found
+                                                            ? 'bg-green-100 text-green-800'
+                                                            : 'bg-red-100 text-red-800'
+                                                            }`}>
                                                             {site.gsm_antenna_found ? '✓ GSM' : '✗ GSM'}
                                                         </span>
                                                     ) : (
@@ -2143,11 +2114,10 @@ export default function DashboardView() {
                                                 {/* MW Passive - MW Antenna */}
                                                 <td className="px-4 py-3 text-center">
                                                     {site.mw_antenna_required ? (
-                                                        <span className={`inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium ${
-                                                            site.mw_antenna_found
-                                                                ? 'bg-green-100 text-green-800'
-                                                                : 'bg-red-100 text-red-800'
-                                                        }`}>
+                                                        <span className={`inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium ${site.mw_antenna_found
+                                                            ? 'bg-green-100 text-green-800'
+                                                            : 'bg-red-100 text-red-800'
+                                                            }`}>
                                                             {site.mw_antenna_found ? '✓ MW' : '✗ MW'}
                                                         </span>
                                                     ) : (
@@ -2183,6 +2153,6 @@ export default function DashboardView() {
                 )}
 
             </div>
-        </main>
+        </main >
     );
 }
