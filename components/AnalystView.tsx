@@ -16,6 +16,7 @@ interface InventoryRow {
     serial_number: string | null;
     tag_id: string | null;
     tag_category: string | null;
+    photo_category: string | null;
     serial_pic_url: string | null;
     tag_pic_url: string | null;
     created_by_name: string | null;
@@ -133,6 +134,25 @@ export default function AnalystView() {
                         planned_date: planMap.get(r.site_id)
                     }));
                 }
+
+                // Fetch Photo Category data manually since it's missing from the view
+                if (finalRows.length > 0) {
+                    const ids = finalRows.map(r => r.id);
+                    const { data: photoData } = await supabase
+                        .from('main_inventory')
+                        .select('id, photo_category')
+                        .in('id', ids);
+
+                    if (photoData) {
+                        const photoMap = new Map();
+                        photoData.forEach((p: any) => photoMap.set(p.id, p.photo_category));
+
+                        finalRows = finalRows.map(r => ({
+                            ...r,
+                            photo_category: photoMap.get(r.id) || r.photo_category // Use fetched if avail, else keep existing (likely null)
+                        }));
+                    }
+                }
             }
 
             setData(finalRows);
@@ -175,7 +195,7 @@ export default function AnalystView() {
 
             // Build base query
             const buildQuery = () => {
-                let q = supabase.from('v_main_inventory_audit').select('site_id, category, equipment_type, product_name, product_number, serial_number, tag_id, tag_category, serial_pic_url, tag_pic_url, sheet_source, updated_at, created_by_name, updated_by_name');
+                let q = supabase.from('v_main_inventory_audit').select('id, site_id, category, equipment_type, product_name, product_number, serial_number, tag_id, tag_category, photo_category, serial_pic_url, tag_pic_url, sheet_source, updated_at, created_by_name, updated_by_name');
                 if (debouncedSearch.site) q = q.ilike('site_id', `%${debouncedSearch.site}%`);
                 if (debouncedSearch.serial) q = q.ilike('serial_number', `%${debouncedSearch.serial}%`);
                 return q;
@@ -198,6 +218,24 @@ export default function AnalystView() {
                 if (!batch || batch.length === 0) {
                     hasMore = false;
                 } else {
+                    const ids = batch.map((r: any) => r.id);
+                    // Fetch photo categories for this batch
+                    if (ids.length > 0) {
+                        const { data: photoData } = await supabase
+                            .from('main_inventory')
+                            .select('id, photo_category')
+                            .in('id', ids);
+
+                        if (photoData) {
+                            const photoMap = new Map();
+                            photoData.forEach((p: any) => photoMap.set(p.id, p.photo_category));
+                            // Merge back
+                            batch.forEach((r: any) => {
+                                r.photo_category = photoMap.get(r.id) || r.photo_category;
+                            });
+                        }
+                    }
+
                     allRows = [...allRows, ...batch];
                     fetchedCount += batch.length;
                     offset += BATCH_SIZE;
@@ -207,7 +245,7 @@ export default function AnalystView() {
             }
 
             // Convert to CSV
-            const headers = ['Site ID', 'Category', 'Equipment', 'Product', 'Prod #', 'Serial', 'Tag ID', 'Tag Cat', 'Serial Photo', 'Tag Photo', 'Source', 'Updated', 'Created By', 'Updated By'];
+            const headers = ['Site ID', 'Category', 'Equipment', 'Product', 'Prod #', 'Serial', 'Tag ID', 'Tag Cat', 'Photo Cat', 'Serial Photo', 'Tag Photo', 'Source', 'Updated', 'Created By', 'Updated By'];
             const csvRows = allRows.map(r => [
                 r.site_id,
                 r.category,
@@ -217,6 +255,7 @@ export default function AnalystView() {
                 r.serial_number,
                 r.tag_id,
                 r.tag_category,
+                r.photo_category,
                 r.serial_pic_url,
                 r.tag_pic_url,
                 r.sheet_source,
@@ -323,6 +362,7 @@ export default function AnalystView() {
                                     <th className="px-4 py-3 border-b">Tag ID</th>
                                     <th className="px-4 py-3 border-b text-center">Tag Photo</th>
                                     <th className="px-4 py-3 border-b">Tag Category</th>
+                                    <th className="px-4 py-3 border-b">Photo Category</th>
                                     <th className="px-4 py-3 border-b">Source</th>
                                     <th className="px-4 py-3 border-b">Audit</th>
                                 </tr>
@@ -404,6 +444,7 @@ export default function AnalystView() {
                                                 ) : <span className="text-slate-300">-</span>}
                                             </td>
                                             <td className="px-4 py-2 text-slate-600">{row.tag_category || '-'}</td>
+                                            <td className="px-4 py-2 text-slate-600">{row.photo_category || '-'}</td>
                                             <td className="px-4 py-2 text-slate-600">
                                                 <span className={`inline-flex items-center px-2 py-0.5 rounded text-xs font-medium ${row.sheet_source === 'manual_edited' || row.sheet_source === 'manual_added'
                                                     ? 'bg-green-100 text-green-800'
