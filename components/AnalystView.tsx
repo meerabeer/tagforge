@@ -195,7 +195,9 @@ export default function AnalystView() {
 
             // Build base query
             const buildQuery = () => {
-                let q = supabase.from('v_main_inventory_audit').select('id, site_id, category, equipment_type, product_name, product_number, serial_number, tag_id, tag_category, photo_category, serial_pic_url, tag_pic_url, sheet_source, updated_at, created_by_name, updated_by_name');
+                // `photo_category` is fetched from `main_inventory` below because some deployments
+                // still run a `v_main_inventory_audit` view version without that column.
+                let q = supabase.from('v_main_inventory_audit').select('id, site_id, category, equipment_type, product_name, product_number, serial_number, tag_id, tag_category, serial_pic_url, tag_pic_url, sheet_source, updated_at, created_by_name, updated_by_name');
                 if (debouncedSearch.site) q = q.ilike('site_id', `%${debouncedSearch.site}%`);
                 if (debouncedSearch.serial) q = q.ilike('serial_number', `%${debouncedSearch.serial}%`);
                 return q;
